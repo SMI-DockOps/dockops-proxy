@@ -177,7 +177,25 @@ app.put('/api/pipeline/:rowId', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
- 
+
+ // Shipyard Intake — writes new client lead to Smartsheet
+app.post('/api/intake', async (req, res) => {
+  try {
+    const { sheetId, row } = req.body;
+    const r = await fetch(
+      `${SS_BASE}/sheets/${sheetId}/rows`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify([row])
+      }
+    );
+    const data = await r.json();
+    res.status(r.ok ? 200 : r.status).json(data);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 // ─────────────────────────────────────────────────────────────
 // START
 // ─────────────────────────────────────────────────────────────
