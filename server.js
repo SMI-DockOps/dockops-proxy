@@ -109,6 +109,7 @@ const PROXY_TOKEN = process.env.PROXY_TOKEN;
 app.use((req, res, next) => {
   if (!PROXY_TOKEN) return next(); // no token set → open (dev mode)
   if (req.path === '/' || req.path === '/api/cache/status') return next();
+  if (req.path === '/api/intake') return next(); // public form — no auth required
   const auth = req.headers['authorization'] || '';
   if (auth === `Bearer ${PROXY_TOKEN}`) return next();
   res.status(401).json({ error: 'Unauthorized' });
