@@ -26,8 +26,8 @@ button{font-family:'Barlow',sans-serif;cursor:pointer;}
 </head>
 <body>
 <div id="fb">
-  <span><strong>DockOps</strong> &nbsp;·&nbsp; Stabbert Marine &amp; Industrial &nbsp;·&nbsp; v4.0</span>
-  <span class="fbb">v4.0 LIVE</span>
+  <span><strong>DockOps</strong> &nbsp;·&nbsp; Stabbert Marine &amp; Industrial &nbsp;·&nbsp; v4.2</span>
+  <span class="fbb">v4.2 LIVE</span>
 </div>
 <div id="root"></div>
 <script type="text/babel">
@@ -78,7 +78,7 @@ const YARD_META = {
   },
   anacortes: {
     label: 'SMI — Anacortes',
-    subtitle: 'Anacortes, WA  ·  Salt Water Port',
+    subtitle: '3100 Oakes Ave, Anacortes, WA 98221  ·  Salt Water Port',
     moorage: '1,800ft moorage  ·  Vessels up to 450ft  ·  500 LT Dry Dock  ·  750T & 300T Railways  ·  50,000 sqft covered  ·  3 Harbor Slips',
     cranes: '75T · 60T · 30T · 15T',
     ganttRows: ['LgWay','SmWay','DryDock','Outside','Slip1','Slip2','Slip3'],
@@ -829,7 +829,7 @@ function YardTab({onRefresh}) {
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px',flexWrap:'wrap',gap:'10px'}}>
         <div>
-          <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'34px',fontWeight:700,color:'#f1f5f9'}}>Yard</h1>
+          <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'34px',fontWeight:700,color:'#f1f5f9'}}>{yard==='ballard'?'SMI-B':'SMI-A'}</h1>
           <p style={{fontSize:'13px',color:'#64748b',marginTop:'4px'}}>{Y.subtitle}</p>
         </div>
         <div style={{display:'flex',background:'rgba(255,255,255,0.04)',borderRadius:'8px',border:'1px solid rgba(255,255,255,0.09)',padding:'3px',gap:'2px'}}>
