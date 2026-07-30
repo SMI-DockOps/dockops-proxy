@@ -345,9 +345,39 @@ app.put('/api/leads/:rowId', async (req, res) => {
 app.post('/api/intake', async (req, res) => {
   if (!SHEETS.leads) return res.status(503).json({ error: 'SHEET_LEADS not configured' });
   try {
-    normalizeVesselName(req.body);
     const colMap = await getColMap(SHEETS.leads);
-    const cells  = buildCells(colMap, req.body);
+    let cells;
+    let flatData = {}; // field-name keyed version for CRM upsert
+
+    // ── Legacy format from website form ──────────────────────────
+    // Form sends: { sheetId, row: { cells: [{columnId, value}], toBottom } }
+    // The sheetId from the client is IGNORED — we always use SHEETS.leads.
+    // We accept the pre-built cells directly since they already reference
+    // the correct column IDs for the Leads sheet.
+    if (req.body.row && Array.isArray(req.body.row.cells)) {
+      cells = req.body.row.cells;
+
+      // Inject Lead Status = 'New — Needs Review' if the form didn't include it
+      const statusColId = colMap['Lead Status'];
+      if (statusColId && !cells.some(c => c.columnId === statusColId)) {
+        cells = [...cells, { columnId: statusColId, value: 'New — Needs Review' }];
+      }
+
+      // Build a reverse map (columnId → column name) so we can extract
+      // field values for the CRM upsert without knowing the IDs in advance
+      const idToName = Object.fromEntries(Object.entries(colMap).map(([k, v]) => [v, k]));
+      cells.forEach(cell => {
+        const name = idToName[cell.columnId];
+        if (name) flatData[name] = cell.value;
+      });
+
+    // ── Flat field-name format (future/internal calls) ────────────
+    } else {
+      normalizeVesselName(req.body);
+      cells   = buildCells(colMap, req.body);
+      flatData = req.body;
+    }
+
     const r = await fetch(`${SS_BASE}/sheets/${SHEETS.leads}/rows`, {
       method: 'POST',
       headers: HEADERS,
@@ -356,16 +386,17 @@ app.post('/api/intake', async (req, res) => {
     const data = await r.json();
 
     // Auto-create/update Clients & Vessels record from intake data
-    if (r.ok && req.body['Vessel Name'] && SHEETS.clients) {
+    const vesselName = flatData['Vessel Name'] || flatData['Vessel'] || '';
+    if (r.ok && vesselName && SHEETS.clients) {
       try {
         await upsertClientRecord({
-          'Vessel Name':     req.body['Vessel Name'],
-          'First Name':      req.body['First Name']  || '',
-          'Last Name':       req.body['Last Name']   || '',
-          'Owner / Company': req.body['Company / Vessel Owner'] || req.body['Company'] || '',
-          'Email':           req.body['Email Address'] || req.body['Email'] || '',
-          'Phone':           req.body['Phone Number']  || req.body['Phone']  || '',
-          'Preferred Yard':  normalizeYard(req.body['Preferred Yard'] || ''),
+          'Vessel Name':     toTitleCase(vesselName),
+          'First Name':      flatData['First Name']  || '',
+          'Last Name':       flatData['Last Name']   || '',
+          'Owner / Company': flatData['Company / Vessel Owner'] || flatData['Company'] || '',
+          'Email':           flatData['Email Address'] || flatData['Email'] || '',
+          'Phone':           flatData['Phone Number']  || flatData['Phone']  || '',
+          'Preferred Yard':  normalizeYard(flatData['Preferred Yard'] || ''),
           'Client Status':   'Prospect',
           'Source':          'Intake Form',
         });
