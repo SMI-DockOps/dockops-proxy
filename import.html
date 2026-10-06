@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DockOps · Dock Schedule Import</title>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<style>
+  :root { --bg:#f5f7fa; --card:#fff; --ink:#1b2430; --muted:#5b6675; --line:#dde3ea; --navy:#13324f;
+          --green:#1e8e4a; --yellow:#b88a00; --red:#c0392b; --blue:#1f6fb2; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header { background:var(--navy); color:#fff; padding:16px 24px; }
+  header h1 { margin:0; font-size:18px; } header p { margin:2px 0 0; opacity:.8; font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:16px; }
+  .card h2 { margin:0 0 10px; font-size:16px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  input[type=password], select { padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+  button { padding:9px 16px; border:0; border-radius:6px; background:var(--blue); color:#fff; font-size:14px; cursor:pointer; }
+  button.go { background:var(--green); } button:disabled { opacity:.45; cursor:default; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:28px; text-align:center; color:var(--muted); cursor:pointer; }
+  .drop.over { border-color:var(--blue); background:#eef5fc; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { flex:1; min-width:120px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .stat b { display:block; font-size:22px; } .stat span { color:var(--muted); font-size:12px; }
+  .wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .warn { background:#fff7e0; border:1px solid #f0d58a; border-radius:8px; padding:10px 12px; margin:8px 0; }
+  .err { background:#fdecea; border:1px solid #f1b0a8; border-radius:8px; padding:10px 12px; margin:8px 0; }
+  .ok { background:#e8f6ee; border:1px solid #a9dcbc; border-radius:8px; padding:10px 12px; margin:8px 0; }
+  .muted { color:var(--muted); font-size:13px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; color:#fff; }
+  .a { background:var(--green); } .p { background:var(--yellow); } .w { background:var(--red); }
+  .hidden { display:none; }
+  details summary { cursor:pointer; font-weight:600; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DockOps · Dock Schedule Import</h1>
+  <p>Upload the latest SMI A or SMI-B Dock Schedule. Nothing changes in DockOps until you press Import.</p>
+</header>
+<main>
+  <div class="card" id="authCard">
+    <h2>1. Access code</h2>
+    <div class="row">
+      <input type="password" id="token" placeholder="DockOps
