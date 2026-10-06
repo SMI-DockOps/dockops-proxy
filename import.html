@@ -47,4 +47,334 @@
   <div class="card" id="authCard">
     <h2>1. Access code</h2>
     <div class="row">
-      <input type="password" id="token" placeholder="DockOps
+      <input type="password" id="token" placeholder="DockOps access code">
+      <button id="saveToken">Continue</button>
+    </div>
+  </div>
+
+  <div class="card" id="fileCard">
+    <h2>2. Choose the Excel file</h2>
+    <div class="drop" id="drop">Drop the Dock Schedule .xlsx here, or click to choose it
+      <input type="file" id="file" accept=".xlsx" class="hidden"></div>
+    <div class="row" style="margin-top:12px">
+      <label>Yard: <select id="yard"><option value="">—</option><option>Ballard</option><option>Anacortes</option></select></label>
+      <span class="muted" id="fileInfo"></span>
+    </div>
+    <div id="parseMsg"></div>
+  </div>
+
+  <div class="card hidden" id="reviewCard">
+    <h2>3. Review what was found</h2>
+    <div id="review"></div>
+  </div>
+
+  <div class="card hidden" id="planCard">
+    <h2>4. Changes DockOps will make</h2>
+    <div id="plan"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="go" id="importBtn" disabled>Import to DockOps</button>
+      <span class="muted" id="importMsg"></span>
+    </div>
+  </div>
+</main>
+
+<script>
+// ===== DOCK SCHEDULE PARSER (pure function, runs in the browser) =====
+// Turns a PM "Dock Schedule" grid (dates down, berths across, colored cells)
+// into one record per vessel stay.
+
+// Excel berth headers (row 2) -> DockOps berth names.
+// null = not mapped yet; those stays are listed but not imported.
+var BERTH_MAP = {
+  Ballard: {
+    'Dry Dock #1': 'DD1', 'Dry Dock #2': 'DD2',
+    '1': 'PS1', '2': 'PS2', '3': 'PS3', '4': 'PS4', '5': 'PS5', '6': 'PS6', '7': 'PS7',
+    'Boathouse': 'BH1', 'Boathouse (2)': 'BH2'
+  },
+  Anacortes: {
+    '750 T Railway': 'Large Railway', '500 T Railway': 'Small Railway',
+    '1': 'Outside Moorage',
+    '2': null, '3': null, '4': null, '5': null, '6': null, '7': null,
+    '8': null, '9': null, '10': null, '11': null, '12': null, '13': null, '14': null
+  }
+};
+
+// Cell fill colors from the sheet legend
+var COLOR_STATUS = { 'FF00B050': 'actual', 'FFFFFF00': 'projected', 'FFFF0000': 'waived' };
+
+// Entries that occupy a berth but may not be a customer vessel
+var NOT_A_VESSEL = /reblock|blocking|recycle|new con/i;
+
+function cleanName(v) {
+  if (v == null) return '';
+  if (typeof v === 'object' && v.richText) v = v.richText.map(function (t) { return t.text; }).join('');
+  if (typeof v === 'object' && v.result !== undefined) v = v.result;
+  return String(v).trim().replace(/\s+/g, ' ');
+}
+function isoDate(d) {
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+}
+function fillOf(cell) {
+  var f = cell && cell.fill;
+  return (f && f.type === 'pattern' && f.fgColor && f.fgColor.argb) ? String(f.fgColor.argb).toUpperCase() : null;
+}
+
+function pickScheduleSheet(wb) {
+  var pick = null;
+  wb.eachSheet(function (ws) { if (!pick && /^DDX/i.test(ws.name)) pick = ws; });
+  return pick || wb.worksheets[0];
+}
+
+function detectYard(ws) {
+  var text = '';
+  ws.getRow(2).eachCell(function (c) { text += ' ' + cleanName(c.value); });
+  if (/railway/i.test(text)) return 'Anacortes';
+  if (/dry dock #|boathouse/i.test(text)) return 'Ballard';
+  return '';
+}
+
+// Find berth blocks: each non-empty row-2 header starts a block until the next one
+function findBlocks(ws) {
+  var starts = [], seen = {};
+  var maxCol = ws.columnCount;
+  for (var c = 2; c <= maxCol; c++) {
+    var cell = ws.getRow(2).getCell(c);
+    if (cell.isMerged && cell.master.address !== cell.address) continue;
+    var label = cleanName(cell.value);
+    if (!label) continue;
+    seen[label] = (seen[label] || 0) + 1;
+    if (seen[label] > 1) label = label + ' (' + seen[label] + ')';
+    starts.push({ label: label, start: c });
+  }
+  return starts.map(function (b, i) {
+    var end = i + 1 < starts.length ? starts[i + 1].start - 1 : Math.min(maxCol, b.start + 3);
+    var loaCol = null, spCol = null, kwCol = null, vesselCol = null;
+    for (var c = b.start; c <= end; c++) {
+      var h = cleanName(ws.getRow(3).getCell(c).value).toLowerCase();
+      if (!h) continue;
+      if (h === 'loa') loaCol = c;
+      else if (h.indexOf('sp') === 0) spCol = c;
+      else if (h.indexOf('kw') === 0) kwCol = c;
+      else if (!vesselCol) vesselCol = c;
+    }
+    return { label: b.label, vesselCol: vesselCol, loaCol: loaCol, spCol: spCol };
+  }).filter(function (b) { return b.vesselCol; });
+}
+
+function parseDockSchedule(wb, yardOverride) {
+  var ws = pickScheduleSheet(wb);
+  var yard = yardOverride || detectYard(ws);
+  var map = BERTH_MAP[yard] || {};
+  var blocks = findBlocks(ws);
+  var stays = [], dates = [];
+
+  // Date rows: column A holds a real date
+  var rows = [];
+  for (var r = 4; r <= ws.rowCount; r++) {
+    var d = ws.getRow(r).getCell(1).value;
+    if (d instanceof Date) { rows.push({ r: r, date: isoDate(d) }); dates.push(isoDate(d)); }
+  }
+
+  blocks.forEach(function (b) {
+    var cur = null, prevDate = null;
+    rows.forEach(function (row) {
+      var R = ws.getRow(row.r);
+      var vcell = R.getCell(b.vesselCol);
+      var name = cleanName(vcell.value);
+      var key = name.toLowerCase();
+      var consecutive = prevDate && (Date.parse(row.date) - Date.parse(prevDate) === 86400000);
+      if (!name) { if (cur) stays.push(cur); cur = null; prevDate = row.date; return; }
+      if (!cur || cur._key !== key || !consecutive) {
+        if (cur) stays.push(cur);
+        cur = {
+          _key: key, vessel: name, excelBerth: b.label, berth: map[b.label] || null,
+          arrival: row.date, departure: row.date, loa: null,
+          days: 0, actualDays: 0, projectedDays: 0, waivedDays: 0, uncoloredDays: 0, shorePowerDays: 0,
+          notVessel: NOT_A_VESSEL.test(name)
+        };
+      }
+      cur.departure = row.date;
+      cur.days++;
+      var color = fillOf(vcell) || (b.loaCol ? fillOf(R.getCell(b.loaCol)) : null);
+      var st = COLOR_STATUS[color];
+      if (st) cur[st + 'Days']++; else cur.uncoloredDays++;
+      if (b.spCol && cleanName(R.getCell(b.spCol).value).toUpperCase() === 'Y') cur.shorePowerDays++;
+      if (cur.loa == null && b.loaCol) {
+        var loa = R.getCell(b.loaCol).value;
+        if (typeof loa === 'number') cur.loa = loa;
+      }
+      prevDate = row.date;
+    });
+    if (cur) stays.push(cur);
+  });
+
+  stays.forEach(function (s) { delete s._key; });
+  dates.sort();
+  return {
+    sheetName: ws.name, yard: yard,
+    coverage: { from: dates[0], to: dates[dates.length - 1] },
+    stays: stays
+  };
+}
+
+
+// ===== PAGE LOGIC =====
+var API = 'https://dockops-proxy.onrender.com';
+var TOKEN_KEY = 'dockopsImportToken';
+var state = { wb: null, parsed: null, exclude: {} };
+var $ = function (id) { return document.getElementById(id); };
+var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]; }); };
+var fmt = function (d) { if (!d) return ''; var p = d.split('-'); return p[1] + '/' + p[2] + '/' + p[0].slice(2); };
+
+function token() { try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
+function showAuth() { $('authCard').classList.toggle('hidden', !!token()); }
+$('saveToken').onclick = function () {
+  try { sessionStorage.setItem(TOKEN_KEY, $('token').value.trim()); } catch (e) {}
+  showAuth(); if (state.parsed) runPlan();
+};
+showAuth();
+
+var drop = $('drop');
+drop.onclick = function () { $('file').click(); };
+drop.ondragover = function (e) { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = function () { drop.classList.remove('over'); };
+drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); };
+$('file').onchange = function (e) { if (e.target.files[0]) loadFile(e.target.files[0]); };
+$('yard').onchange = function () { if (state.wb) parse($('yard').value); };
+
+function loadFile(file) {
+  $('fileInfo').textContent = file.name;
+  $('parseMsg').innerHTML = '<p class="muted">Reading file…</p>';
+  file.arrayBuffer().then(function (buf) {
+    var wb = new ExcelJS.Workbook();
+    return wb.xlsx.load(buf).then(function () { state.wb = wb; state.exclude = {}; parse(''); });
+  }).catch(function (err) {
+    $('parseMsg').innerHTML = '<div class="err">Could not read this file: ' + esc(err.message) + '</div>';
+  });
+}
+
+function parse(yard) {
+  var p = parseDockSchedule(state.wb, yard);
+  state.parsed = p;
+  $('yard').value = p.yard;
+  if (!p.yard) {
+    $('parseMsg').innerHTML = '<div class="warn">Couldn’t tell which yard this file is for. Pick the yard above.</div>';
+    return;
+  }
+  $('parseMsg').innerHTML = '<div class="ok">Read tab “' + esc(p.sheetName) + '” · ' + fmt(p.coverage.from) + ' – ' + fmt(p.coverage.to) + '</div>';
+  renderReview(); runPlan();
+}
+
+function stayId(s) { return s.excelBerth + '|' + s.vessel + '|' + s.arrival; }
+function importable() {
+  return state.parsed.stays.filter(function (s) { return s.berth && !state.exclude[stayId(s)]; });
+}
+
+function renderReview() {
+  var p = state.parsed, stays = p.stays;
+  var mapped = stays.filter(function (s) { return s.berth; });
+  var unmapped = stays.filter(function (s) { return !s.berth; });
+  var flagged = mapped.filter(function (s) { return s.notVessel; });
+  var uncolored = mapped.filter(function (s) { return s.uncoloredDays > 0; });
+  var sum = function (arr, k) { return arr.reduce(function (a, s) { return a + s[k]; }, 0); };
+
+  var h = '<div class="stats">' +
+    '<div class="stat"><b>' + mapped.length + '</b><span>vessel stays</span></div>' +
+    '<div class="stat"><b>' + sum(mapped, 'actualDays') + '</b><span><span class="pill a">Actual</span> days</span></div>' +
+    '<div class="stat"><b>' + sum(mapped, 'projectedDays') + '</b><span><span class="pill p">Projected</span> days</span></div>' +
+    '<div class="stat"><b>' + sum(mapped, 'waivedDays') + '</b><span><span class="pill w">Waived</span> days</span></div>' +
+    '<div class="stat"><b>' + sum(mapped, 'shorePowerDays') + '</b><span>shore power days</span></div></div>';
+
+  if (unmapped.length) {
+    var berths = {}; unmapped.forEach(function (s) { berths[s.excelBerth] = true; });
+    h += '<div class="warn"><b>' + unmapped.length + ' stays skipped — berth not mapped yet</b> (Excel berth: ' +
+      Object.keys(berths).map(esc).join(', ') + '). These won’t import until the berth is added to the BERTH_MAP list in import.html.' +
+      table(unmapped, false) + '</div>';
+  }
+  if (flagged.length) {
+    h += '<div class="warn"><b>' + flagged.length + ' entries may not be vessels.</b> They still block the berth, so they’re included by default. Uncheck any you want left out.' +
+      table(flagged, true) + '</div>';
+  }
+  if (uncolored.length) {
+    h += '<div class="warn"><b>' + uncolored.length + ' stays have days with no green/yellow/red color.</b> Those days are counted in the stay but not in Actual, Projected, or Waived.' +
+      table(uncolored, false) + '</div>';
+  }
+  h += '<details><summary>All stays found (' + mapped.length + ')</summary>' + table(mapped, false) + '</details>';
+  $('review').innerHTML = h;
+  $('reviewCard').classList.remove('hidden');
+  Array.prototype.forEach.call(document.querySelectorAll('input[data-stay]'), function (cb) {
+    cb.onchange = function () { state.exclude[cb.dataset.stay] = !cb.checked; runPlan(); };
+  });
+}
+
+function table(list, withCheck) {
+  return '<div class="wrap"><table><tr>' + (withCheck ? '<th>Include</th>' : '') +
+    '<th>Vessel</th><th>Excel berth</th><th>DockOps berth</th><th>Arrive</th><th>Depart</th><th>Days</th><th>Actual</th><th>Proj.</th><th>Waived</th><th>Shore pwr</th></tr>' +
+    list.map(function (s) {
+      return '<tr>' + (withCheck ? '<td><input type="checkbox" data-stay="' + esc(stayId(s)) + '"' + (state.exclude[stayId(s)] ? '' : ' checked') + '></td>' : '') +
+        '<td>' + esc(s.vessel) + '</td><td>' + esc(s.excelBerth) + '</td><td>' + esc(s.berth || '—') + '</td><td>' + fmt(s.arrival) + '</td><td>' + fmt(s.departure) +
+        '</td><td>' + s.days + '</td><td>' + s.actualDays + '</td><td>' + s.projectedDays + '</td><td>' + s.waivedDays + '</td><td>' + s.shorePowerDays + '</td></tr>';
+    }).join('') + '</table></div>';
+}
+
+function callImport(dryRun) {
+  var p = state.parsed;
+  var slow = setTimeout(function () { $('importMsg').textContent = 'Waking up the DockOps server — this can take up to a minute…'; }, 4000);
+  return fetch(API + '/api/schedule-import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token() },
+    body: JSON.stringify({ yard: p.yard, coverage: p.coverage, stays: importable(), dryRun: dryRun })
+  }).then(function (r) {
+    clearTimeout(slow); $('importMsg').textContent = '';
+    if (r.status === 401) { try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {} showAuth(); throw new Error('Access code not accepted. Re-enter it above.'); }
+    return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || ('Server error ' + r.status)); return j; });
+  }, function (err) { clearTimeout(slow); throw err; });
+}
+
+function runPlan() {
+  if (!state.parsed || !state.parsed.yard) return;
+  $('planCard').classList.remove('hidden');
+  $('importBtn').disabled = true;
+  if (!token()) { $('plan').innerHTML = '<div class="warn">Enter the access code above to preview changes.</div>'; return; }
+  $('plan').innerHTML = '<p class="muted">Comparing with DockOps…</p>';
+  callImport(true).then(function (s) {
+    renderPlan(s, false);
+    $('importBtn').disabled = (s.counts.add + s.counts.update + s.counts.remove) === 0;
+  }).catch(function (err) { $('plan').innerHTML = '<div class="err">' + esc(err.message) + '</div>'; });
+}
+
+function renderPlan(s, done) {
+  var c = s.counts;
+  var h = (done ? '<div class="ok"><b>Import complete.</b> DockOps now reflects this file.</div>' : '') +
+    '<div class="stats">' +
+    '<div class="stat"><b>' + c.add + '</b><span>' + (done ? 'added' : 'to add') + '</span></div>' +
+    '<div class="stat"><b>' + c.update + '</b><span>' + (done ? 'updated' : 'to update') + '</span></div>' +
+    '<div class="stat"><b>' + c.remove + '</b><span>' + (done ? 'removed' : 'to remove') + '</span></div>' +
+    '<div class="stat"><b>' + c.unchanged + '</b><span>unchanged</span></div></div>';
+  var list = function (title, rows, extra) {
+    if (!rows.length) return '';
+    return '<details' + (title.indexOf('Remove') === 0 ? ' open' : '') + '><summary>' + title + ' (' + rows.length + ')</summary><div class="wrap"><table><tr><th>Vessel</th><th>Berth</th><th>Arrive</th><th>Depart</th>' +
+      (extra ? '<th>What changes</th>' : '') + '</tr>' + rows.map(function (r) {
+        return '<tr><td>' + esc(r.vessel) + '</td><td>' + esc(r.berth) + '</td><td>' + fmt(r.arrival) + '</td><td>' + fmt(r.departure) + '</td>' +
+          (extra ? '<td>' + esc((r.changes || []).join(', ')) + '</td>' : '') + '</tr>';
+      }).join('') + '</table></div></details>';
+  };
+  h += list('Add', s.add) + list('Update', s.update, true) + list('Remove (no longer in the Excel file)', s.remove);
+  if (s.unmatchedManual.length) {
+    h += '<div class="warn"><b>' + s.unmatchedManual.length + ' hand-entered DockOps rows didn’t match anything in this file.</b> ' +
+      'They are left alone. If they’re duplicates of imported stays (spelling or berth differs), delete them in Smartsheet.' +
+      list('Hand-entered rows to review', s.unmatchedManual) + '</div>';
+  }
+  $('plan').innerHTML = h;
+}
+
+$('importBtn').onclick = function () {
+  var btn = $('importBtn');
+  if (!confirm('Import this file into DockOps for ' + state.parsed.yard + '?')) return;
+  btn.disabled = true; $('importMsg').textContent = 'Importing…';
+  callImport(false).then(function (s) { renderPlan(s, true); $('importMsg').textContent = ''; })
+    .catch(function (err) { $('importMsg').textContent = ''; $('plan').insertAdjacentHTML('afterbegin', '<div class="err">' + esc(err.message) + '</div>'); btn.disabled = false; });
+};
+</script>
+</body>
+</html>
