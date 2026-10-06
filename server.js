@@ -633,6 +633,141 @@ app.put('/api/clients/:rowId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// DOCK SCHEDULE IMPORT  (POST /api/schedule-import)
+// Receives vessel stays parsed from a PM's Dock Schedule Excel file
+// (parsing happens in import.html). Always writes to SHEETS.schedule —
+// never to a client-supplied sheet.
+//   dryRun: true  → returns what WOULD change, writes nothing
+//   dryRun: false → applies the changes
+// Rules:
+//   • Only Excel-owned fields are written. Work Order, Notes, Beam, Draft
+//     are never touched, so DockOps edits survive every import.
+//   • Hand-entered rows (blank Import Key) are matched and adopted when
+//     yard + berth + vessel + overlapping dates line up. Unmatched
+//     hand-entered rows are reported, never deleted.
+//   • Imported rows that disappear from the Excel file are removed, but
+//     only for the same yard and only inside the file's date range.
+// ─────────────────────────────────────────────────────────────
+const IMPORT_REQUIRED_COLS = ['Import Key', 'Actual Days', 'Projected Days', 'Waived Days', 'Shore Power Days'];
+const IMPORT_COMPARE_FIELDS = ['Vessel Name', 'Berth', 'Visit Status', 'Arrival Date', 'Departure Date', 'LOA (ft)',
+  'Actual Days', 'Projected Days', 'Waived Days', 'Shore Power Days'];
+
+const importNorm  = s => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const importDate  = v => (v ? String(v).slice(0, 10) : '');
+const importSame  = (a, b) => {
+  const na = Number(a), nb = Number(b);
+  if (a !== '' && b !== '' && a != null && b != null && !isNaN(na) && !isNaN(nb)) return na === nb;
+  return importNorm(a) === importNorm(b);
+};
+const importToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+const importVisitStatus = (arr, dep, today) => (dep < today ? 'Completed' : arr > today ? 'Upcoming' : 'Active');
+
+function planScheduleImport(existingRows, { yard, coverage, stays }, today) {
+  const rows = existingRows.filter(r => r['Yard'] === yard);
+  const claimed = new Set();
+  const plan = { add: [], update: [], unchanged: 0, remove: [], unmatchedManual: [] };
+
+  for (const s of stays) {
+    const key = `${yard}|${s.berth}|${s.arrival}|${importNorm(s.vessel)}`;
+    const free = r => !claimed.has(r._rowId);
+    let match = rows.find(r => free(r) && r['Import Key'] === key);
+    if (!match) {
+      match = rows.find(r => free(r)
+        && r['Berth'] === s.berth
+        && importNorm(r['Vessel Name']) === importNorm(s.vessel)
+        && r['Arrival Date'] && r['Departure Date']
+        && importDate(r['Arrival Date']) <= s.departure && s.arrival <= importDate(r['Departure Date']));
+    }
+
+    const data = {
+      'Vessel Name': s.vessel,
+      'Yard': yard,
+      'Berth': s.berth,
+      'Visit Status': importVisitStatus(s.arrival, s.departure, today),
+      'Arrival Date': s.arrival,
+      'Departure Date': s.departure,
+      'Import Key': key,
+      'Actual Days': s.actualDays,
+      'Projected Days': s.projectedDays,
+      'Waived Days': s.waivedDays,
+      'Shore Power Days': s.shorePowerDays,
+    };
+    if (typeof s.loa === 'number') data['LOA (ft)'] = s.loa;
+    if (typeof normalizeVesselName === 'function') normalizeVesselName(data);
+
+    const label = { vessel: data['Vessel Name'], berth: s.berth, arrival: s.arrival, departure: s.departure };
+    if (!match) { plan.add.push({ ...label, data }); continue; }
+
+    claimed.add(match._rowId);
+    const changed = IMPORT_COMPARE_FIELDS.filter(f => data[f] !== undefined && !importSame(
+      f.includes('Date') ? importDate(match[f]) : match[f], data[f]));
+    if (match['Import Key'] !== key) changed.push(match['Import Key'] ? 'Import Key' : 'Adopted hand-entered row');
+    if (changed.length) plan.update.push({ ...label, rowId: match._rowId, changes: changed, data });
+    else plan.unchanged++;
+  }
+
+  for (const r of rows) {
+    if (claimed.has(r._rowId)) continue;
+    const arr = importDate(r['Arrival Date']);
+    const inRange = arr && arr >= coverage.from && arr <= coverage.to;
+    const label = { vessel: r['Vessel Name'], berth: r['Berth'], arrival: arr, departure: importDate(r['Departure Date']) };
+    if (r['Import Key']) { if (inRange) plan.remove.push({ ...label, rowId: r._rowId }); }
+    else if (inRange) plan.unmatchedManual.push(label);
+  }
+  return plan;
+}
+
+async function smartsheetCall(method, path, body) {
+  const r = await fetch(`${SS_BASE}${path}`, { method, headers: HEADERS, body: body ? JSON.stringify(body) : undefined });
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Smartsheet ${method} failed (${r.status}): ${json.message || 'unknown error'}`);
+  return json;
+}
+
+app.post('/api/schedule-import', async (req, res) => {
+  try {
+    const { yard, coverage, stays, dryRun } = req.body || {};
+    if (!['Ballard', 'Anacortes'].includes(yard)) return res.status(400).json({ error: 'Yard must be Ballard or Anacortes.' });
+    if (!Array.isArray(stays) || !coverage?.from || !coverage?.to) return res.status(400).json({ error: 'Missing stays or date range.' });
+    const bad = stays.find(s => !s.vessel || !s.berth || !/^\d{4}-\d{2}-\d{2}$/.test(s.arrival || '') || !/^\d{4}-\d{2}-\d{2}$/.test(s.departure || ''));
+    if (bad) return res.status(400).json({ error: `Invalid stay record: ${JSON.stringify(bad)}` });
+
+    const sheetId = SHEETS.schedule;
+    const colMap = await getColMap(sheetId);
+    const missing = IMPORT_REQUIRED_COLS.filter(c => colMap[c] === undefined);
+    if (missing.length) return res.status(400).json({ error: `Schedule sheet is missing columns: ${missing.join(', ')}. Add them in Smartsheet, then redeploy the proxy.` });
+
+    invalidate(sheetId);
+    const existing = await getRows(sheetId);
+    const plan = planScheduleImport(existing, { yard, coverage, stays }, importToday());
+    const summary = {
+      dryRun: !!dryRun, yard, coverage,
+      counts: { add: plan.add.length, update: plan.update.length, unchanged: plan.unchanged, remove: plan.remove.length, unmatchedManual: plan.unmatchedManual.length },
+      add: plan.add.map(({ data, ...x }) => x),
+      update: plan.update.map(({ data, ...x }) => x),
+      remove: plan.remove,
+      unmatchedManual: plan.unmatchedManual,
+    };
+    if (dryRun) return res.json(summary);
+
+    const chunk = (arr, n) => arr.reduce((out, x, i) => (i % n ? out[out.length - 1].push(x) : out.push([x]), out), []);
+    for (const part of chunk(plan.update, 200)) {
+      await smartsheetCall('PUT', `/sheets/${sheetId}/rows`, part.map(u => ({ id: u.rowId, cells: buildCells(colMap, u.data) })));
+    }
+    for (const part of chunk(plan.add, 200)) {
+      await smartsheetCall('POST', `/sheets/${sheetId}/rows`, part.map(a => ({ toBottom: true, cells: buildCells(colMap, a.data) })));
+    }
+    for (const part of chunk(plan.remove, 100)) {
+      await smartsheetCall('DELETE', `/sheets/${sheetId}/rows?ids=${part.map(x => x.rowId).join(',')}&ignoreRowsNotFound=true`);
+    }
+    invalidate(sheetId);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // START
 // ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
