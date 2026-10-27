@@ -191,6 +191,7 @@ function transformClients(rows) {
     ownerCompany:    r['Owner / Company']||'',
     firstName:       r['First Name']||'',
     lastName:        r['Last Name']||'',
+    title:           r['Title']||'',
     email:           r['Email']||'',
     phone:           r['Phone']||'',
     assignedRep:     r['Assigned Rep']||'',
@@ -910,7 +911,7 @@ function ClientForm({initial, onSave, onCancel}) {
   const [form, setForm] = useState(() => {
     try { const d = sessionStorage.getItem(DRAFT_KEY); if (d) return JSON.parse(d); } catch(e) {}
     return initial || {
-      vesselName:'',ownerCompany:'',firstName:'',lastName:'',email:'',phone:'',
+      vesselName:'',ownerCompany:'',firstName:'',lastName:'',title:'',email:'',phone:'',
       assignedRep:'',vesselType:'',loa:'',beam:'',draft:'',grossTonnage:'',yearBuilt:'',
       clientStatus:'Prospect',preferredYard:'No Preference',lastContactDate:'',notes:'',
     };
@@ -931,6 +932,7 @@ function ClientForm({initial, onSave, onCancel}) {
       'Owner / Company':   form.ownerCompany,
       'First Name':        form.firstName,
       'Last Name':         form.lastName,
+      'Title':             form.title||'',
       'Email':             form.email,
       'Phone':             form.phone,
       'Assigned Rep':      form.assignedRep,
@@ -990,9 +992,16 @@ function ClientForm({initial, onSave, onCancel}) {
         <div><label style={LABEL_S}>Owner / Company</label><input style={INPUT_S} value={form.ownerCompany} onChange={e=>set('ownerCompany',e.target.value)}/></div>
         <div><label style={LABEL_S}>Assigned Rep</label><input style={INPUT_S} value={form.assignedRep} onChange={e=>set('assignedRep',e.target.value)}/></div>
       </div>
-      <div style={ROW2}>
+      <div style={ROW3}>
         <div><label style={LABEL_S}>First Name</label><input style={INPUT_S} value={form.firstName} onChange={e=>set('firstName',e.target.value)}/></div>
         <div><label style={LABEL_S}>Last Name</label><input style={INPUT_S} value={form.lastName} onChange={e=>set('lastName',e.target.value)}/></div>
+        <div>
+          <label style={LABEL_S}>Title / Role</label>
+          <input style={INPUT_S} list='contact-title-options' value={form.title||''} placeholder='e.g. Port Engineer' onChange={e=>set('title',e.target.value)}/>
+          <datalist id='contact-title-options'>
+            {['Owner','General Manager','Operations Manager','Fleet Manager','Port Engineer','Port Captain','Captain','Chief Engineer','Purchasing','Accounts Payable'].map(t=><option key={t} value={t}/>)}
+          </datalist>
+        </div>
       </div>
       <div style={ROW2}>
         <div><label style={LABEL_S}>Email</label><input type='email' style={INPUT_S} value={form.email} onChange={e=>set('email',e.target.value)}/></div>
@@ -1098,6 +1107,7 @@ function ClientProfile({client, onBack, onEdit}) {
         <div style={{background:'#0a1828',borderRadius:'8px',padding:'14px 16px'}}>
           <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'12px'}}>CONTACT</div>
           <Field label='Name'         value={[c.firstName,c.lastName].filter(Boolean).join(' ')||null}/>
+          <Field label='Title'        value={c.title}/>
           <Field label='Email'        value={c.email}/>
           <Field label='Phone'        value={c.phone}/>
           <Field label='Assigned Rep' value={c.assignedRep}/>
@@ -1222,7 +1232,7 @@ function ClientsVesselsTab({refreshKey, onRefresh}) {
   const filtered = CLIENTS.filter(c => {
     const matchFilter = filter==='all' || c.clientStatus===filter;
     const q = search.toLowerCase();
-    const matchSearch = !q || c.vesselName.toLowerCase().includes(q) || c.ownerCompany.toLowerCase().includes(q) || c.firstName.toLowerCase().includes(q) || c.lastName.toLowerCase().includes(q);
+    const matchSearch = !q || c.vesselName.toLowerCase().includes(q) || c.ownerCompany.toLowerCase().includes(q) || c.firstName.toLowerCase().includes(q) || c.lastName.toLowerCase().includes(q) || (c.title||'').toLowerCase().includes(q);
     const matchType = typeFilter==='all' || (typeFilter==='(none)' ? !c.vesselType : c.vesselType===typeFilter);
     return matchFilter && matchSearch && matchType;
   });
