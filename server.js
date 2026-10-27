@@ -475,6 +475,33 @@ async function upsertClientRecord(data) {
   }
 }
 
+// Helper: column map that re-reads Smartsheet if a field is unknown
+// (picks up newly added columns without a Render restart) and reports
+// any fields that still have no matching column.
+async function getColMapFor(sheetId, data) {
+  let colMap = await getColMap(sheetId);
+  const wanted = Object.keys(data).filter(k => k !== '_rowId');
+  if (wanted.some(k => colMap[k] === undefined)) {
+    delete colCache[sheetId];
+    colMap = await getColMap(sheetId);
+  }
+  const unmatchedFields = wanted.filter(k => colMap[k] === undefined);
+  if (unmatchedFields.length) console.warn(`No Smartsheet column for: ${unmatchedFields.join(', ')}`);
+  return { colMap, unmatchedFields };
+}
+
+// Helper: pass Smartsheet's real result (including errors) to the browser
+async function sendSmartsheetResult(res, r, extra = {}) {
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    return res.status(r.status).json({
+      error: body.message ? `Smartsheet rejected the save: ${body.message}` : `Smartsheet error ${r.status}`,
+      ...extra,
+    });
+  }
+  res.json({ ...body, ...extra });
+}
+
 // ── GET /api/clients — all records ──────────────────────────
 app.get('/api/clients', async (req, res) => {
   if (!SHEETS.clients) return res.status(503).json({ error: 'SHEET_CLIENTS not configured' });
@@ -599,7 +626,11 @@ app.post('/api/clients', async (req, res) => {
       });
     }
     if (!req.body['Source']) req.body['Source'] = 'Manual Entry';
-    const colMap = await getColMap(SHEETS.clients);
+    // Skip blank fields on a new record (blank dates can be rejected)
+    Object.keys(req.body).forEach(k => {
+      if (req.body[k] === '' || req.body[k] === null || req.body[k] === undefined) delete req.body[k];
+    });
+    const { colMap, unmatchedFields } = await getColMapFor(SHEETS.clients, req.body);
     const cells  = buildCells(colMap, req.body);
     const r = await fetch(`${SS_BASE}/sheets/${SHEETS.clients}/rows`, {
       method: 'POST',
@@ -607,7 +638,7 @@ app.post('/api/clients', async (req, res) => {
       body: JSON.stringify([{ cells, toBottom: true }])
     });
     if (r.ok) invalidate(SHEETS.clients);
-    res.json(await r.json());
+    await sendSmartsheetResult(res, r, { unmatchedFields });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -618,7 +649,7 @@ app.put('/api/clients/:rowId', async (req, res) => {
   if (!SHEETS.clients) return res.status(503).json({ error: 'SHEET_CLIENTS not configured' });
   try {
     normalizeVesselName(req.body);
-    const colMap = await getColMap(SHEETS.clients);
+    const { colMap, unmatchedFields } = await getColMapFor(SHEETS.clients, req.body);
     const cells  = buildCells(colMap, req.body);
     const r = await fetch(`${SS_BASE}/sheets/${SHEETS.clients}/rows`, {
       method: 'PUT',
@@ -626,7 +657,7 @@ app.put('/api/clients/:rowId', async (req, res) => {
       body: JSON.stringify([{ id: parseInt(req.params.rowId), cells }])
     });
     if (r.ok) invalidate(SHEETS.clients);
-    res.json(await r.json());
+    await sendSmartsheetResult(res, r, { unmatchedFields });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
