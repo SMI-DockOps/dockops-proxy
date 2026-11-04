@@ -384,6 +384,7 @@ app.post('/api/intake', async (req, res) => {
       body: JSON.stringify([{ cells, toBottom: true }])
     });
     const data = await r.json();
+       if (r.ok) invalidate(SHEETS.leads); // so the new lead shows up on the next refresh
 
     // Auto-create/update Clients & Vessels record from intake data
     const vesselName = flatData['Vessel Name'] || flatData['Vessel'] || '';
