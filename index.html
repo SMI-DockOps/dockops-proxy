@@ -47,8 +47,10 @@ const CURR_Q   = Math.ceil((TODAY.getMonth() + 1) / 3);
 const dBetween = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
 const dFrom    = d => Math.max(0, dBetween(TODAY, d));
 const dAgo     = d => Math.max(0, dBetween(d, TODAY));
-const fmt      = d => parseDate(d).toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'});
-const fmtS     = d => parseDate(d).toLocaleDateString('en-US', {month:'short',day:'numeric'});
+// If a value isn't a real date (e.g. Period = "Spring 2026" or "TBD"), show the text as typed instead of "Invalid Date"
+const safeDate = (d, opts) => { if (!d) return '—'; const p = parseDate(d); return isNaN(p) ? String(d) : p.toLocaleDateString('en-US', opts); };
+const fmt      = d => safeDate(d, {month:'short',day:'numeric',year:'numeric'});
+const fmtS     = d => safeDate(d, {month:'short',day:'numeric'});
 const fmtUSD   = n => !n ? '$0' : n >= 1000000 ? `$${(n/1e6).toFixed(1)}M` : `$${(n/1000).toFixed(0)}K`;
 const greeting = () => { const h = TODAY.getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 
@@ -1463,8 +1465,118 @@ function DealExpanded({deal, saving, onUpdateLeadStatus, onMoveToPipeline, onUpd
 // ─────────────────────────────────────────────────────────────
 // SALES TAB
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// NEW LEAD FORM  (Sales tab → "+ New Lead")
+// Saves through /api/intake, which always writes to SHEET_LEADS
+// and auto-creates a Clients & Vessels record when a vessel is given.
+// ─────────────────────────────────────────────────────────────
+function NewLeadForm({onSave, onCancel}) {
+  useFormGuard();
+  const DRAFT_KEY = 'dockops_lead_draft_new';
+  const BLANK = {vessel:'',company:'',firstName:'',lastName:'',email:'',phone:'',yard:'No Preference',arrival:'',budget:'',assignedRep:'',status:'New — Needs Review',description:''};
+  const [restored] = useState(() => { try { return !!sessionStorage.getItem(DRAFT_KEY); } catch(e) { return false; } });
+  const [form, setForm] = useState(() => {
+    try { const d = sessionStorage.getItem(DRAFT_KEY); if (d) return {...BLANK, ...JSON.parse(d)}; } catch(e) {}
+    return BLANK;
+  });
+  useEffect(() => { try { sessionStorage.setItem(DRAFT_KEY, JSON.stringify(form)); } catch(e) {} }, [form]);
+  const clearDraft = () => { try { sessionStorage.removeItem(DRAFT_KEY); } catch(e) {} };
+  const cancel = () => { clearDraft(); onCancel(); };
+  const [saving, setSaving] = useState(false);
+  const [err,    setErr]    = useState('');
+  const set = (k, v) => setForm(f => ({...f, [k]: v}));
+
+  const handleSave = async () => {
+    if (!form.vessel.trim() && !form.company.trim()) { setErr('Enter at least a Vessel Name or a Company.'); return; }
+    setSaving(true); setErr('');
+    // Values below must match the Smartsheet PICKLISTs exactly
+    const payload = {
+      'Vessel Name':            form.vessel.trim(),
+      'Company / Vessel Owner': form.company.trim(),
+      'First Name':             form.firstName.trim(),
+      'Last Name':              form.lastName.trim(),
+      'Email Address':          form.email.trim(),
+      'Phone Number':           form.phone.trim(),
+      'Preferred Yard':         form.yard,
+      'Estimated Arrival':      form.arrival,
+      'Estimated Budget':       form.budget.trim(),
+      'Assigned Rep':           form.assignedRep.trim(),
+      'Lead Status':            form.status,
+      'Project Description':    form.description.trim(),
+    };
+    Object.keys(payload).forEach(k => { if (!payload[k]) delete payload[k]; }); // don't send blanks
+    try {
+      const r = await apiFetch('/api/intake', {method:'POST', body:JSON.stringify(payload)});
+      const data = await r.json().catch(()=>({}));
+      if (r.ok) { clearDraft(); onSave(); }
+      else { setErr(data.message ? `Smartsheet rejected the save: ${data.message}` : (data.error || `Save failed (${r.status})`)); }
+    } catch(e) { setErr(e.message || 'Save failed — check your connection'); }
+    finally { setSaving(false); }
+  };
+
+  const ROW2 = {display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px',marginBottom:'12px'};
+  const ROW3 = {display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'12px'};
+
+  return(
+    <div style={{background:'#0a1828',borderRadius:'12px',border:'1px solid rgba(255,255,255,0.08)',padding:'24px'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+        <h2 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'22px',fontWeight:700,color:'#f1f5f9'}}>Add New Lead</h2>
+        <button onClick={cancel} style={{background:'transparent',border:'none',color:'#64748b',fontSize:'22px',cursor:'pointer',lineHeight:1,padding:'0 4px'}}>×</button>
+      </div>
+
+      {restored&&<div style={{background:'rgba(6,182,212,0.08)',border:'1px solid rgba(6,182,212,0.25)',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',color:'#06b6d4',marginBottom:'14px'}}>Restored your unsaved draft. Click Cancel to discard it.</div>}
+
+      <div style={ROW2}>
+        <div><label style={LABEL_S}>Vessel Name</label><VesselAutocomplete value={form.vessel} onChange={v=>set('vessel',v)} placeholder='Start typing vessel name…'/></div>
+        <div><label style={LABEL_S}>Company / Vessel Owner</label><input style={INPUT_S} value={form.company} onChange={e=>set('company',e.target.value)}/></div>
+      </div>
+      <div style={ROW2}>
+        <div><label style={LABEL_S}>Contact First Name</label><input style={INPUT_S} value={form.firstName} onChange={e=>set('firstName',e.target.value)}/></div>
+        <div><label style={LABEL_S}>Contact Last Name</label><input style={INPUT_S} value={form.lastName} onChange={e=>set('lastName',e.target.value)}/></div>
+      </div>
+      <div style={ROW2}>
+        <div><label style={LABEL_S}>Email</label><input type='email' style={INPUT_S} value={form.email} onChange={e=>set('email',e.target.value)}/></div>
+        <div><label style={LABEL_S}>Phone</label><input style={INPUT_S} value={form.phone} onChange={e=>set('phone',e.target.value)}/></div>
+      </div>
+      <div style={ROW3}>
+        <div>
+          <label style={LABEL_S}>Preferred Yard</label>
+          <select style={{...INPUT_S,...SEL_S,cursor:'pointer'}} value={form.yard} onChange={e=>set('yard',e.target.value)}>
+            {['Ballard (Seattle)','Anacortes','No Preference'].map(s=><option key={s} value={s} style={SEL_S}>{s}</option>)}
+          </select>
+        </div>
+        <div><label style={LABEL_S}>Estimated Arrival</label><input type='date' style={INPUT_S} value={form.arrival} onChange={e=>set('arrival',e.target.value)}/></div>
+        <div><label style={LABEL_S}>Estimated Budget</label><input style={INPUT_S} value={form.budget} placeholder='e.g. 250000' onChange={e=>set('budget',e.target.value)}/></div>
+      </div>
+      <div style={ROW2}>
+        <div><label style={LABEL_S}>Assigned Rep</label><input style={INPUT_S} value={form.assignedRep} onChange={e=>set('assignedRep',e.target.value)}/></div>
+        <div>
+          <label style={LABEL_S}>Starting Stage</label>
+          <select style={{...INPUT_S,...SEL_S,cursor:'pointer'}} value={form.status} onChange={e=>set('status',e.target.value)}>
+            {['New — Needs Review','Contacted','Quoted'].map(s=><option key={s} value={s} style={SEL_S}>{s}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{marginBottom:'16px'}}>
+        <label style={LABEL_S}>Notes / Project Description</label>
+        <textarea style={{...INPUT_S,resize:'vertical',minHeight:'80px'}} value={form.description} placeholder='What the work might be, where the conversation stands, next step…' onChange={e=>set('description',e.target.value)}/>
+      </div>
+
+      {err&&<div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',color:'#f87171',marginBottom:'12px'}}>{err}</div>}
+
+      <div style={{display:'flex',gap:'10px',justifyContent:'flex-end'}}>
+        <button onClick={cancel} disabled={saving} style={{background:'transparent',color:'#64748b',border:'1px solid rgba(255,255,255,0.1)',padding:'8px 20px',borderRadius:'7px',fontSize:'13px',fontWeight:500,cursor:'pointer'}}>Cancel</button>
+        <button onClick={handleSave} disabled={saving} style={{background:saving?'rgba(6,182,212,0.06)':'rgba(6,182,212,0.14)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'8px 24px',borderRadius:'7px',fontSize:'13px',fontWeight:600,cursor:saving?'default':'pointer'}}>
+          {saving?'Saving… (can take up to a minute if the server was asleep)':'Add Lead'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SalesTab({onRefresh}) {
   const [stage,    setStage]    = useState('all');
+  const [showNew,  setShowNew]  = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [saving,   setSaving]   = useState(null);
   const [actionErr,setActionErr]= useState('');
@@ -1532,10 +1644,15 @@ function SalesTab({onRefresh}) {
 
   return(
     <div>
-      <div style={{marginBottom:'20px'}}>
-        <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'34px',fontWeight:700,color:'#f1f5f9'}}>Sales</h1>
-        <p style={{fontSize:'13px',color:'#64748b',marginTop:'4px'}}>All leads and deals — from first contact to closed won</p>
+     <div style={{marginBottom:'20px',display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:'12px'}}>
+        <div>
+          <h1 style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'34px',fontWeight:700,color:'#f1f5f9'}}>Sales</h1>
+          <p style={{fontSize:'13px',color:'#64748b',marginTop:'4px'}}>All leads and deals — from first contact to closed won</p>
+        </div>
+        {!showNew&&<button onClick={()=>setShowNew(true)} style={{background:'rgba(6,182,212,0.14)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'8px 18px',borderRadius:'7px',fontSize:'13px',fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>+ New Lead</button>}
       </div>
+
+      {showNew&&<div style={{marginBottom:'20px'}}><NewLeadForm onSave={()=>{setShowNew(false);onRefresh();}} onCancel={()=>setShowNew(false)}/></div>}
 
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'10px',marginBottom:'20px'}}>
         {[['New Leads',newCount,'#60a5fa',false],[`Won Q${CURR_Q}`,wonQ,'#10b981',true],['In Estimating',estQ,'#f59e0b',true],['Total Pipeline',totP,'#e2e8f0',true]].map(([label,val,color,isUSD])=>(
