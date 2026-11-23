@@ -141,6 +141,32 @@ function transformSchedule(rows, yard) {
   });
 }
 
+// ── Option A: Yard cards get "who's in the berth today" from SHEET_SCHEDULE ──
+// SHEET_BERTHS still supplies berth specs and manual statuses (Reserved, Maintenance, Staging).
+function applyScheduleToDocks(docks, schedule) {
+  const day = d => { const x = parseDate(d); return isNaN(x) ? null : new Date(x.getFullYear(), x.getMonth(), x.getDate()); };
+  const today = new Date(TODAY.getFullYear(), TODAY.getMonth(), TODAY.getDate());
+  const norm = v => String(v||'').trim().toLowerCase();
+  const keysFor = dock => new Set([dock.name, dock.fullName, ANA_BERTH_KEY[dock.name], ANA_BERTH_KEY[dock.fullName]].filter(Boolean).map(norm));
+  return docks.map(dock => {
+    const keys = keysFor(dock);
+    const current = schedule
+      .filter(s => keys.has(norm(s.berth)))
+      .filter(s => { const a = day(s.arrival), d = day(s.departure); return a && d && a <= today && today <= d; })
+      .sort((a, b) => day(b.arrival) - day(a.arrival))[0];
+    if (current) {
+      const same = dock.vessel && norm(dock.vessel.name) === norm(current.vessel);
+      return { ...dock, status:'occupied', vessel:{
+        name: current.vessel, loa: current.loa || null,
+        arrival: current.arrival, departure: current.departure,
+        wo: same ? dock.vessel.wo : null, notes: same ? dock.vessel.notes : null,
+      }};
+    }
+    if (dock.status === 'occupied') return { ...dock, status:'available', vessel:null };
+    return dock;
+  });
+}  
+  
 function transformPipeline(rows) {
   return rows.map(r => ({
     q:      parseInt((r['Quarter']||'Q0').replace('Q','')),
@@ -217,9 +243,11 @@ async function loadFromSmartsheet() {
   ]);
   if (!bR.ok || !sR.ok || !pR.ok) throw new Error('Could not reach the DockOps proxy server.');
   const [bD, sD, pD] = await Promise.all([bR.json(), sR.json(), pR.json()]);
+  const balSched = transformSchedule(sD,'ballard');
+  const anaSched = transformSchedule(sD,'anacortes');
   YARDS = {
-    ballard:   { ...YARD_META.ballard,   docks:transformBerths(bD,'ballard'),   schedule:transformSchedule(sD,'ballard')   },
-    anacortes: { ...YARD_META.anacortes, docks:transformBerths(bD,'anacortes'), schedule:transformSchedule(sD,'anacortes') },
+    ballard:   { ...YARD_META.ballard,   docks:applyScheduleToDocks(transformBerths(bD,'ballard'),   balSched), schedule:balSched },
+    anacortes: { ...YARD_META.anacortes, docks:applyScheduleToDocks(transformBerths(bD,'anacortes'), anaSched), schedule:anaSched },
   };
   PIPELINE = transformPipeline(pD);
   try { const lR = await apiFetch('/api/leads');   if (lR.ok) LEADS   = transformLeads(await lR.json());   } catch(e) { console.warn('Leads unavailable:', e); }
