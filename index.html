@@ -760,8 +760,20 @@ function Gantt({yard}) {
   const endDate=new Date(calStart.getFullYear(),calStart.getMonth()+4,0);
   const rangeLabel=`${calStart.toLocaleDateString('en-US',{month:'short',year:'numeric'})} — ${endDate.toLocaleDateString('en-US',{month:'short',year:'numeric'})}`;
   const LW=140;
-  const geom=(a,d)=>{const sd=Math.round((parseDate(a)-CAL_S)/86400000),ed=Math.round((parseDate(d)-CAL_S)/86400000);if(ed<=0||sd>=CAL_D)return null;const cs=Math.max(0,sd),ce=Math.min(CAL_D,ed);return{left:`${(cs/CAL_D)*100}%`,width:`${((ce-cs)/CAL_D)*100}%`,radius:`${sd<=0?0:4}px ${ed>=CAL_D?0:4}px ${ed>=CAL_D?0:4}px ${sd<=0?0:4}px`};};
-  const rows=Y.ganttRows.map(k=>({k,label:Y.ganttLabels[k],bars:Y.schedule.filter(s=>s.berth===k).map(s=>{const g=geom(s.arrival,s.departure);return g?{...s,g,color:vColor(s.vessel)}:null;}).filter(Boolean)}));
+  const geom=(a,d)=>{const sd=Math.round((parseDate(a)-CAL_S)/86400000),ed=Math.round((parseDate(d)-CAL_S)/86400000);if(ed<=0||sd>=CAL_D)return null;const cs=Math.max(0,sd),ce=Math.min(CAL_D,ed);return{cs,ce,left:`${(cs/CAL_D)*100}%`,width:`${((ce-cs)/CAL_D)*100}%`,radius:`${sd<=0?0:4}px ${ed>=CAL_D?0:4}px ${ed>=CAL_D?0:4}px ${sd<=0?0:4}px`};};
+  // Berths can hold more than one vessel at once (e.g. Outside Moorage).
+  // Everything stays on one line: the first vessel is a solid bar and any
+  // vessel that overlaps it is drawn on top as a hatched bar for its whole stay.
+  const rows=Y.ganttRows.map(k=>{
+    const bars=Y.schedule.filter(s=>s.berth===k).map(s=>{const g=geom(s.arrival,s.departure);return g?{...s,g,color:vColor(s.vessel)}:null;}).filter(Boolean).sort((a,b)=>a.g.cs-b.g.cs);
+    const laneEnds=[];
+    bars.forEach(b=>{let l=laneEnds.findIndex(e=>e<=b.g.cs);if(l<0){l=laneEnds.length;laneEnds.push(0);}laneEnds[l]=b.g.ce;b.lane=l;});
+    bars.forEach(b=>{b.sharing=bars.filter(o=>o!==b&&o.g.cs<b.g.ce&&b.g.cs<o.g.ce).map(o=>o.vessel);});
+    const lanes=Math.max(1,laneEnds.length);
+    return{k,label:Y.ganttLabels[k],bars:[...bars].sort((a,b)=>a.lane-b.lane),shared:lanes>1,lanes};
+  });
+  const anyShared=rows.some(r=>r.shared);
+  const hatchOf=c=>`repeating-linear-gradient(45deg, ${c} 0 3px, transparent 3px 9px)`;
   const BTN={background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:'#94a3b8',padding:'5px 13px',fontSize:'12px',fontWeight:600,cursor:'pointer'};
   const BTN_TODAY={...BTN,background:'rgba(6,182,212,0.1)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.25)'};
   return(
@@ -778,9 +790,10 @@ function Gantt({yard}) {
       <div style={{display:'flex'}}>
         <div style={{width:LW+'px',flexShrink:0}}>
           <div style={{height:'24px'}}/>
-          {rows.map(({k,label})=>(
-            <div key={k} style={{height:'32px',display:'flex',alignItems:'center',justifyContent:'flex-end',paddingRight:'10px'}}>
+          {rows.map(({k,label,shared,lanes})=>(
+            <div key={k} style={{height:'32px',display:'flex',flexDirection:'column',alignItems:'flex-end',justifyContent:'center',paddingRight:'10px'}}>
               <span style={{fontSize:'10px',fontWeight:600,color:'#64748b',textAlign:'right',lineHeight:1.2}}>{label}</span>
+              {shared&&<span style={{fontSize:'9px',fontWeight:700,color:'#f59e0b',letterSpacing:'0.04em',marginTop:'3px'}}>SHARED · {lanes} VESSELS</span>}
             </div>
           ))}
         </div>
@@ -796,20 +809,24 @@ function Gantt({yard}) {
               </div>
             )}
             {rows.map(({k,bars},ri)=>(
-              <div key={k} style={{position:'relative',height:'32px',borderBottom:'1px solid rgba(255,255,255,0.04)',display:'flex',alignItems:'center'}}>
-                {bars.map((bar,bi)=>(
+              <div key={k} style={{position:'relative',height:'32px',borderBottom:'1px solid rgba(255,255,255,0.04)'}}>
+                {bars.map((bar,bi)=>{const second=bar.lane>0;const on=hov===`${ri}-${bi}`;return(
                   <div key={bi} onMouseEnter={()=>setHov(`${ri}-${bi}`)} onMouseLeave={()=>setHov(null)}
-                    style={{position:'absolute',left:bar.g.left,width:bar.g.width,height:'22px',background:bar.color,borderRadius:bar.g.radius,display:'flex',alignItems:'center',paddingLeft:'7px',overflow:'hidden',cursor:'default',opacity:0.87,zIndex:2}}>
-                    <span style={{fontSize:'10px',fontWeight:700,color:'#fff',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',textShadow:'0 1px 3px rgba(0,0,0,0.7)'}}>{bar.vessel}</span>
+                    style={{position:'absolute',left:bar.g.left,width:bar.g.width,top:'5px',height:'22px',background:second?hatchOf(bar.color):bar.color,border:second?`1px dashed ${bar.color}`:'none',boxSizing:'border-box',borderRadius:bar.g.radius,display:'flex',alignItems:'center',justifyContent:second?'flex-end':'flex-start',paddingLeft:'7px',paddingRight:second?'7px':0,overflow:on?'visible':'hidden',cursor:'default',opacity:second?1:0.87,zIndex:on?20:2+bar.lane}}>
+                    <span style={{fontSize:'10px',fontWeight:700,color:'#fff',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',textShadow:second?'0 0 3px #000,0 1px 3px rgba(0,0,0,0.9)':'0 1px 3px rgba(0,0,0,0.7)',visibility:!second&&bar.sharing.length?'hidden':'visible'}}>{bar.vessel}</span>
                     {hov===`${ri}-${bi}`&&(
                       <div style={{position:'absolute',left:0,top:'26px',background:'#1a2d45',border:'1px solid rgba(255,255,255,0.13)',borderRadius:'7px',padding:'10px 13px',zIndex:100,minWidth:'170px',pointerEvents:'none',boxShadow:'0 6px 20px rgba(0,0,0,0.5)'}}>
                         <div style={{fontSize:'12px',fontWeight:700,color:'#e2e8f0',marginBottom:'3px'}}>{bar.vessel}</div>
                         <div style={{fontSize:'11px',color:'#64748b',marginBottom:'2px'}}>{fmtS(bar.arrival)} → {fmtS(bar.departure)}</div>
                         {bar.loa&&<div style={{fontSize:'11px',color:'#64748b'}}>LOA: {bar.loa}ft</div>}
+                        {bar.sharing.length>0&&<div style={{fontSize:'11px',color:'#f59e0b',marginTop:'2px'}}>Shares berth with {bar.sharing.join(', ')}</div>}
                         <div style={{fontSize:'10px',color:'#334155',marginTop:'3px'}}>{k}</div>
                       </div>
                     )}
                   </div>
+                );})}
+                {bars.filter(b=>b.lane===0&&b.sharing.length).map((b,i)=>(
+                  <span key={'lbl'+i} style={{position:'absolute',left:b.g.left,top:'5px',height:'22px',lineHeight:'22px',paddingLeft:'7px',fontSize:'10px',fontWeight:700,color:'#fff',whiteSpace:'nowrap',textShadow:'0 0 3px #000,0 1px 3px rgba(0,0,0,0.9)',zIndex:8,pointerEvents:'none'}}>{b.vessel}</span>
                 ))}
               </div>
             ))}
@@ -817,6 +834,12 @@ function Gantt({yard}) {
         </div>
       </div>
       <div style={{display:'flex',flexWrap:'wrap',gap:'10px',marginTop:'12px',paddingLeft:LW+'px'}}>
+        {anyShared&&(
+          <div style={{display:'flex',alignItems:'center',gap:'5px'}}>
+            <div style={{width:'18px',height:'10px',borderRadius:'2px',background:hatchOf('#94a3b8'),border:'1px dashed #94a3b8',boxSizing:'border-box'}}/>
+            <span style={{fontSize:'10px',color:'#f59e0b'}}>Hatched = second vessel on a shared berth</span>
+          </div>
+        )}
         {[...new Set(Y.schedule.map(s=>s.vessel))].map(v=>(
           <div key={v} style={{display:'flex',alignItems:'center',gap:'5px'}}>
             <div style={{width:'10px',height:'10px',borderRadius:'2px',background:vColor(v)}}/>
