@@ -52,6 +52,9 @@ const safeDate = (d, opts) => { if (!d) return '—'; const p = parseDate(d); re
 const fmt      = d => safeDate(d, {month:'short',day:'numeric',year:'numeric'});
 const fmtS     = d => safeDate(d, {month:'short',day:'numeric'});
 const fmtUSD   = n => !n ? '$0' : n >= 1000000 ? `$${(n/1e6).toFixed(1)}M` : `$${(n/1000).toFixed(0)}K`;
+const fmtUSDx  = n => (n===null||n===undefined||n==='') ? '—' : `$${Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}`;
+const toNum    = v => { const n=Number(String(v??'').replace(/[$,\s]/g,'')); return (v===''||v===null||v===undefined||isNaN(n)) ? null : n; };
+const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const greeting = () => { const h = TODAY.getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 
 // ─────────────────────────────────────────────────────────────
@@ -185,6 +188,9 @@ function transformPipeline(rows) {
     pop:    r['Period']||'—',
     status: (r['Status']||'').toLowerCase(),
     notes:  r['Notes']||'',
+    quoted:     toNum(r['Quoted Amount']),
+    quoteDate:  r['Quote Date']||'',
+    lostReason: r['Lost Reason']||'',
     _rowId: r._rowId,
   }));
 }
@@ -211,6 +217,8 @@ function transformLeads(rows) {
     assignedRep: r['Assigned Rep']||r['Rep']||'',
     status:      r['Lead Status']||'New — Needs Review',
     lostReason:  r['Lost Reason']||'',
+    quoted:      toNum(r['Quoted Amount']),
+    quoteDate:   r['Quote Date']||'',
     submitted:   r['Submission Date']||r['Date Submitted']||r['Created']||'',
   })).sort((a,b) => {
     const da = a.submitted ? parseDate(a.submitted) : new Date(0);
@@ -1534,50 +1542,107 @@ function ClientsVesselsTab({refreshKey, onRefresh}) {
 // ─────────────────────────────────────────────────────────────
 function DealExpanded({deal, saving, onUpdateLeadStatus, onMoveToPipeline, onUpdatePipelineStatus}) {
   const r = deal._raw;
+  const isLead = deal._type==='lead';
   const [localLeadStatus,     setLocalLeadStatus]     = useState(r.status||'');
   const [localPipelineStatus, setLocalPipelineStatus] = useState(r.status||'');
   const [lostReason,          setLostReason]          = useState(r.lostReason||'');
-  const isDirtyLead     = deal._type==='lead'     && localLeadStatus!==r.status;
-  const isDirtyPipeline = deal._type==='pipeline' && localPipelineStatus!==r.status;
-  const canSaveLead     = isDirtyLead && (localLeadStatus!=='Closed — Lost' || lostReason.trim());
+  // Quote tracking — Quoted Amount is the ORIGINAL quote and is locked once saved (Edit to correct a typo).
+  const [quoteInput,   setQuoteInput]   = useState(r.quoted!=null?String(r.quoted):'');
+  const [editingQuote, setEditingQuote] = useState(r.quoted==null);
+  // Final amount when a pipeline deal is Won — written to Value ($)
+  const [finalInput,   setFinalInput]   = useState(r.value?String(r.value):(r.quoted!=null?String(r.quoted):''));
+
+  const quoteNum     = toNum(quoteInput);
+  const quoteChanged = quoteNum!==(r.quoted??null);
+  const finalNum     = toNum(finalInput);
+
+  // ── Lead rules ──
+  const leadStatusChanged = isLead && localLeadStatus!==r.status;
+  const leadNeedsQuote    = isLead && localLeadStatus==='Quoted' && quoteNum==null;
+  const leadNeedsReason   = isLead && localLeadStatus==='Closed — Lost' && !lostReason.trim();
+  const isDirtyLead       = isLead && (leadStatusChanged || quoteChanged);
+  const canSaveLead       = isDirtyLead && !leadNeedsQuote && !leadNeedsReason;
+
+  // ── Pipeline rules ── (Status PICKLIST in Smartsheet: Lead / Estimating / Won / Lost)
+  const PIPE_PICK = {lead:'Lead',estimating:'Estimating',won:'Won',lost:'Lost'};
+  const pipeStatusChanged = !isLead && localPipelineStatus!==r.status;
+  const pipeNeedsFinal    = !isLead && localPipelineStatus==='won'  && finalNum==null;
+  const pipeNeedsReason   = !isLead && localPipelineStatus==='lost' && !lostReason.trim();
+  const finalChanged      = !isLead && localPipelineStatus==='won' && finalNum!==(r.value||null);
+  const isDirtyPipeline   = !isLead && (pipeStatusChanged || quoteChanged || finalChanged);
+  const canSavePipeline   = isDirtyPipeline && !pipeNeedsFinal && !pipeNeedsReason;
+
+  const quoteFields = () => {
+    const out={};
+    if(quoteChanged){
+      out['Quoted Amount']=quoteNum==null?'':quoteNum;
+      if(quoteNum!=null&&!r.quoteDate) out['Quote Date']=todayISO();
+    }
+    return out;
+  };
+  const saveLead = () => {
+    const payload={'Lead Status':localLeadStatus,...quoteFields()};
+    if(localLeadStatus==='Closed — Lost') payload['Lost Reason']=lostReason.trim();
+    onUpdateLeadStatus(r,payload);
+  };
+  const savePipeline = () => {
+    const payload={'Status':PIPE_PICK[localPipelineStatus]||localPipelineStatus,...quoteFields()};
+    if(quoteChanged&&quoteNum!=null&&!r.value) payload['Value ($)']=quoteNum;   // seed pipeline value from the quote
+    if(localPipelineStatus==='won')  payload['Value ($)']=finalNum;              // final won amount
+    if(localPipelineStatus==='lost') payload['Lost Reason']=lostReason.trim();
+    onUpdatePipelineStatus(r,payload);
+  };
+
+  const Row = ({k,v,color}) => (
+    <div style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
+      <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
+      <span style={{fontSize:'11px',color:color||'#94a3b8',textAlign:'right',wordBreak:'break-all'}}>{v}</span>
+    </div>
+  );
+  const btnStyle = ok => ({background:ok?'rgba(6,182,212,0.14)':'rgba(255,255,255,0.05)',color:ok?'#06b6d4':'#475569',border:`1px solid ${ok?'rgba(6,182,212,0.35)':'rgba(255,255,255,0.1)'}`,padding:'7px 16px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:ok?'pointer':'default'});
+  const variance = (r.quoted&&r.value&&r.status==='won') ? r.value-r.quoted : null;
 
   return(
     <div style={{padding:'16px 20px 18px',background:'rgba(255,255,255,0.018)',borderTop:'1px solid rgba(255,255,255,0.05)'}}>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'14px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'12px',marginBottom:'14px'}}>
         <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
-          <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>{deal._type==='lead'?'CONTACT':'DEAL DETAILS'}</div>
-          {deal._type==='lead'&&[['Name',`${r.firstName||''} ${r.lastName||''}`.trim()||'—'],['Company',r.company||'—'],['Email',r.email||'—'],['Phone',r.phone||'—'],['Rep',r.assignedRep||'Unassigned']].map(([k,v])=>(
-            <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
-              <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
-              <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right',wordBreak:'break-all'}}>{v}</span>
-            </div>
-          ))}
-          {deal._type==='pipeline'&&[['Rep',r.rep||'—'],['Location',r.loc||'—'],['Quarter',`Q${r.q}`],['Period',r.pop||'—'],['Value',r.value?fmtUSD(r.value):'—']].map(([k,v])=>(
-            <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
-              <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
-              <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right'}}>{v}</span>
-            </div>
-          ))}
+          <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>{isLead?'CONTACT':'DEAL DETAILS'}</div>
+          {isLead&&[['Name',`${r.firstName||''} ${r.lastName||''}`.trim()||'—'],['Company',r.company||'—'],['Email',r.email||'—'],['Phone',r.phone||'—'],['Rep',r.assignedRep||'Unassigned']].map(([k,v])=><Row key={k} k={k} v={v}/>)}
+          {!isLead&&[['Rep',r.rep||'—'],['Location',r.loc||'—'],['Quarter',`Q${r.q}`],['Period',r.pop||'—'],['Value',r.value?fmtUSDx(r.value):'—']].map(([k,v])=><Row key={k} k={k} v={v}/>)}
         </div>
         <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
           <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>VESSEL</div>
-          {deal._type==='lead'&&[['Vessel',r.vessel||'—'],['Type',r.vesselType||'—'],['Yard Pref',r.yard||'—'],['LOA',r.loa?`${r.loa}ft`:'—'],['Est. Arrival',r.arrival?fmtS(r.arrival):'—'],['Duration',r.duration?`${r.duration} days`:'—']].map(([k,v])=>(
-            <div key={k} style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
-              <span style={{fontSize:'11px',color:'#475569',flexShrink:0}}>{k}</span>
-              <span style={{fontSize:'11px',color:'#94a3b8',textAlign:'right'}}>{v}</span>
+          {isLead&&[['Vessel',r.vessel||'—'],['Type',r.vesselType||'—'],['Yard Pref',r.yard||'—'],['LOA',r.loa?`${r.loa}ft`:'—'],['Est. Arrival',r.arrival?fmtS(r.arrival):'—'],['Duration',r.duration?`${r.duration} days`:'—']].map(([k,v])=><Row key={k} k={k} v={v}/>)}
+          {!isLead&&<div style={{fontSize:'13px',color:'#e2e8f0',fontWeight:500,marginTop:'4px'}}>{r.vessel}</div>}
+        </div>
+        <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
+          <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>QUOTE</div>
+          {!editingQuote ? (
+            <>
+              <Row k='Quoted Amount' v={fmtUSDx(r.quoted)} color='#06b6d4'/>
+              <Row k='Quote Date' v={r.quoteDate?fmtS(r.quoteDate):'—'}/>
+              {!isLead&&r.status==='won'&&<Row k='Final (Won)' v={fmtUSDx(r.value)} color='#10b981'/>}
+              {variance!==null&&<Row k='vs. Quote' v={`${variance>=0?'+':'−'}${fmtUSDx(Math.abs(variance))}`} color={variance>=0?'#10b981':'#f59e0b'}/>}
+              {r.status&&/lost/i.test(r.status)&&r.lostReason&&<Row k='Lost Reason' v={r.lostReason} color='#f87171'/>}
+              <button onClick={()=>setEditingQuote(true)} disabled={saving} style={{marginTop:'6px',background:'transparent',border:'none',color:'#475569',fontSize:'11px',cursor:'pointer',textDecoration:'underline',padding:0}}>Correct quoted amount</button>
+            </>
+          ) : (
+            <div>
+              <label style={LABEL_S}>Quoted Amount ($){isLead&&localLeadStatus==='Quoted'&&<span style={{color:'#f87171'}}> *</span>}</label>
+              <input style={INPUT_S} inputMode='decimal' value={quoteInput} placeholder='e.g. 85000' disabled={saving} onChange={e=>setQuoteInput(e.target.value)}/>
+              <div style={{fontSize:'10px',color:'#475569',marginTop:'6px'}}>The original quote. It stays as-is when the deal is won or lost, then click Save.</div>
             </div>
-          ))}
-          {deal._type==='pipeline'&&<div style={{fontSize:'13px',color:'#e2e8f0',fontWeight:500,marginTop:'4px'}}>{r.vessel}</div>}
+          )}
         </div>
         <div style={{background:'#0a1828',borderRadius:'8px',padding:'12px 14px'}}>
           <div style={{fontSize:'10px',fontWeight:700,color:'#334155',letterSpacing:'0.1em',marginBottom:'9px'}}>NOTES</div>
-          <div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.6'}}>{(deal._type==='lead'?(r.description||r.services||''):r.notes)||'—'}</div>
-          {deal._type==='lead'&&r.budget&&<div style={{marginTop:'8px',fontSize:'11px',color:'#64748b'}}>Budget: {r.budget}</div>}
+          <div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.6'}}>{(isLead?(r.description||r.services||''):r.notes)||'—'}</div>
+          {isLead&&r.budget&&<div style={{marginTop:'8px',fontSize:'11px',color:'#64748b'}}>Budget: {r.budget}</div>}
         </div>
       </div>
 
       <div style={{display:'flex',flexDirection:'column',gap:'8px',paddingTop:'4px',borderTop:'1px solid rgba(255,255,255,0.05)'}}>
-        {deal._type==='lead'&&(
+        {isLead&&(
           <div style={{display:'flex',alignItems:'flex-end',gap:'10px',flexWrap:'wrap'}}>
             <div>
               <label style={LABEL_S}>Update Status</label>
@@ -1592,20 +1657,14 @@ function DealExpanded({deal, saving, onUpdateLeadStatus, onMoveToPipeline, onUpd
               </button>
             )}
             {isDirtyLead&&(
-              <button onClick={()=>onUpdateLeadStatus(r,localLeadStatus,lostReason)} disabled={saving||!canSaveLead}
-                style={{background:canSaveLead?'rgba(6,182,212,0.14)':'rgba(255,255,255,0.05)',color:canSaveLead?'#06b6d4':'#475569',border:`1px solid ${canSaveLead?'rgba(6,182,212,0.35)':'rgba(255,255,255,0.1)'}`,padding:'7px 16px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:canSaveLead?'pointer':'default'}}>
-                {saving?'Saving…':'Save Status'}
+              <button onClick={saveLead} disabled={saving||!canSaveLead} style={btnStyle(canSaveLead)}>
+                {saving?'Saving…':'Save'}
               </button>
             )}
+            {leadNeedsQuote&&<span style={{fontSize:'11px',color:'#f87171'}}>Enter the quoted amount to mark this Quoted</span>}
           </div>
         )}
-        {deal._type==='lead'&&localLeadStatus==='Closed — Lost'&&(
-          <div>
-            <label style={{...LABEL_S,color:'#f87171'}}>Lost Reason <span style={{color:'#64748b'}}>(required to save)</span></label>
-            <textarea value={lostReason} onChange={e=>setLostReason(e.target.value)} placeholder='Why was this opportunity lost?' style={{...INPUT_S,resize:'vertical',minHeight:'52px',borderColor:'rgba(248,113,113,0.25)'}}/>
-          </div>
-        )}
-        {deal._type==='pipeline'&&(
+        {!isLead&&(
           <div style={{display:'flex',alignItems:'flex-end',gap:'10px',flexWrap:'wrap'}}>
             <div>
               <label style={LABEL_S}>Deal Status</label>
@@ -1614,12 +1673,23 @@ function DealExpanded({deal, saving, onUpdateLeadStatus, onMoveToPipeline, onUpd
                 {[['lead','Lead'],['estimating','Estimating'],['won','Closed – Won'],['lost','Closed – Lost']].map(([v,l])=><option key={v} value={v} style={SEL_S}>{l}</option>)}
               </select>
             </div>
+            {localPipelineStatus==='won'&&(
+              <div>
+                <label style={{...LABEL_S,color:'#10b981'}}>Final Won Amount ($) <span style={{color:'#64748b'}}>(required)</span></label>
+                <input style={{...INPUT_S,width:'180px',borderColor:'rgba(16,185,129,0.3)'}} inputMode='decimal' value={finalInput} placeholder='Signed / invoiced value' disabled={saving} onChange={e=>setFinalInput(e.target.value)}/>
+              </div>
+            )}
             {isDirtyPipeline&&(
-              <button onClick={()=>onUpdatePipelineStatus(r,localPipelineStatus)} disabled={saving}
-                style={{background:'rgba(6,182,212,0.14)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.35)',padding:'7px 16px',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:saving?'default':'pointer'}}>
-                {saving?'Saving…':'Save Status'}
+              <button onClick={savePipeline} disabled={saving||!canSavePipeline} style={btnStyle(canSavePipeline)}>
+                {saving?'Saving…':'Save'}
               </button>
             )}
+          </div>
+        )}
+        {((isLead&&localLeadStatus==='Closed — Lost')||(!isLead&&localPipelineStatus==='lost'))&&(
+          <div>
+            <label style={{...LABEL_S,color:'#f87171'}}>Lost Reason <span style={{color:'#64748b'}}>(required to save)</span></label>
+            <textarea value={lostReason} onChange={e=>setLostReason(e.target.value)} placeholder='Why was this opportunity lost? (price, schedule, went elsewhere…)' style={{...INPUT_S,resize:'vertical',minHeight:'52px',borderColor:'rgba(248,113,113,0.25)'}}/>
           </div>
         )}
       </div>
@@ -1750,11 +1820,11 @@ function SalesTab({onRefresh}) {
   const deals = [];
   LEADS.filter(l=>l.status!=='Moved to Pipeline').forEach(l=>{
     const stageKey = {'New — Needs Review':'new','Contacted':'contacted','Quoted':'quoted','Closed — Lost':'lost'}[l.status]||'new';
-    deals.push({_id:`lead-${l._rowId}`,_type:'lead',_rowId:l._rowId,stageKey,stageLabel:l.status,vessel:l.vessel||'—',company:l.company||'—',rep:l.assignedRep||'—',yard:l.yard==='No Preference'?'Any':(l.yard||'—'),value:null,date:l.arrival||l.submitted||'',notes:(l.description||l.services||'').slice(0,80),quarter:null,_raw:l});
+    deals.push({_id:`lead-${l._rowId}`,_type:'lead',_rowId:l._rowId,stageKey,stageLabel:l.status,vessel:l.vessel||'—',company:l.company||'—',rep:l.assignedRep||'—',yard:l.yard==='No Preference'?'Any':(l.yard||'—'),value:l.quoted||null,date:l.arrival||l.submitted||'',notes:(l.description||l.services||'').slice(0,80),quarter:null,_raw:l});
   });
   PIPELINE.forEach(p=>{
     const stageKey = {'lead':'in_progress','estimating':'in_progress','won':'won','lost':'lost'}[p.status]||'in_progress';
-    deals.push({_id:`pipeline-${p._rowId}`,_type:'pipeline',_rowId:p._rowId,stageKey,stageLabel:(PSC[p.status]||{label:p.status}).label,vessel:p.vessel||'—',company:'—',rep:p.rep||'—',yard:p.loc||'—',value:p.value||null,date:p.pop||'',notes:(p.notes||'').slice(0,80),quarter:p.q,_raw:p});
+    deals.push({_id:`pipeline-${p._rowId}`,_type:'pipeline',_rowId:p._rowId,stageKey,stageLabel:(PSC[p.status]||{label:p.status}).label,vessel:p.vessel||'—',company:'—',rep:p.rep||'—',yard:p.loc||'—',value:p.value||p.quoted||null,date:p.pop||'',notes:(p.notes||'').slice(0,80),quarter:p.q,_raw:p});
   });
   const order={new:0,contacted:1,quoted:2,in_progress:3,won:4,lost:5};
   deals.sort((a,b)=>(order[a.stageKey]||0)-(order[b.stageKey]||0));
@@ -1765,10 +1835,9 @@ function SalesTab({onRefresh}) {
   const newCount= LEADS.filter(l=>l.status==='New — Needs Review').length;
   const totP    = PIPELINE.reduce((a,p)=>a+p.value,0);
 
-  const updateLeadStatus = async (lead, newStatus, lostReason='') => {
+  // payload = Smartsheet column → value, built in DealExpanded (status, Quoted Amount, Lost Reason…)
+  const updateLeadStatus = async (lead, payload) => {
     setSaving(`lead-${lead._rowId}`); setActionErr('');
-    const payload={'Lead Status':newStatus};
-    if(newStatus==='Closed — Lost'&&lostReason.trim()) payload['Lost Reason']=lostReason.trim();
     try {
       const r=await apiFetch(`/api/leads/${lead._rowId}`,{method:'PUT',body:JSON.stringify(payload)});
       if(r.ok){setExpanded(null);onRefresh();}
@@ -1785,6 +1854,9 @@ function SalesTab({onRefresh}) {
       const pPayload={'Vessel Name':lead.vessel,'Status':'Lead','Quarter':q,'Value ($)':0,'Notes':`From Intake — Services: ${lead.services||'—'}${lead.description?' | '+lead.description:''}`.trim(),'Period':lead.arrival||''};
       const yName=YMAP[lead.yard];
       if(yName) pPayload['Yard']=yName;
+      // Carry the original quote over so it is never lost when the deal moves
+      if(lead.quoted){ pPayload['Quoted Amount']=lead.quoted; pPayload['Value ($)']=lead.quoted; }
+      if(lead.quoteDate) pPayload['Quote Date']=lead.quoteDate;
       const pR=await apiFetch('/api/pipeline',{method:'POST',body:JSON.stringify(pPayload)});
       if(!pR.ok){const e=await pR.json();throw new Error(`Pipeline add failed: ${e.error||JSON.stringify(e)}`);}
       await apiFetch(`/api/leads/${lead._rowId}`,{method:'PUT',body:JSON.stringify({'Lead Status':'Moved to Pipeline'})});
@@ -1793,12 +1865,11 @@ function SalesTab({onRefresh}) {
     finally{setSaving(null);}
   };
 
-  const updatePipelineStatus = async (item, newStatus) => {
+  // payload = Smartsheet column → value, built in DealExpanded (Status, Value ($), Quoted Amount, Lost Reason…)
+  const updatePipelineStatus = async (item, payload) => {
     setSaving(`pipeline-${item._rowId}`); setActionErr('');
-    // Map internal key → Smartsheet PICKLIST value
-    const capMap={won:'Won',lost:'Closed - Lost',lead:'Lead',estimating:'Estimating'};
     try {
-      const r=await apiFetch(`/api/pipeline/${item._rowId}`,{method:'PUT',body:JSON.stringify({'Status':capMap[newStatus]||newStatus})});
+      const r=await apiFetch(`/api/pipeline/${item._rowId}`,{method:'PUT',body:JSON.stringify(payload)});
       if(r.ok){setExpanded(null);onRefresh();}
       else{const d=await r.json().catch(()=>({}));setActionErr(d.error||`Update failed (${r.status})`);}
     } catch(e){setActionErr(e.message);}
