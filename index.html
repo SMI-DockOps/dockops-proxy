@@ -97,10 +97,10 @@ const YARD_META = {
   anacortes: {
     label: 'SMI — Anacortes',
     subtitle: '3100 Oakes Ave, Anacortes, WA 98221  ·  Salt Water Port',
-    moorage: '1,800ft moorage  ·  Vessels up to 450ft  ·  500 LT Dry Dock  ·  750T & 300T Railways  ·  50,000 sqft covered  ·  3 Harbor Slips',
+    moorage: '1,800ft moorage  ·  Vessels up to 450ft  ·  750T & 300T Railways  ·  50,000 sqft covered  ·  3 Harbor Slips',
     cranes: '75T · 60T · 30T · 15T',
-    ganttRows: ['LgWay','SmWay','DryDock','Outside','Slip1','Slip2','Slip3'],
-    ganttLabels: {LgWay:'Large Railway',SmWay:'Small Railway (Scrap)',DryDock:'Dry Dock',Outside:'Outside Moorage',Slip1:'Harbor Slip 1',Slip2:'Harbor Slip 2',Slip3:'Harbor Slip 3'},
+    ganttRows: ['LgWay','SmWay','Outside','Slip1','Slip2','Slip3'],
+    ganttLabels: {LgWay:'Large Railway',SmWay:'Small Railway (Scrap)',Outside:'Outside Moorage',Slip1:'Harbor Slip 1',Slip2:'Harbor Slip 2',Slip3:'Harbor Slip 3'},
   },
 };
 
@@ -255,7 +255,7 @@ async function loadFromSmartsheet() {
   const anaSched = transformSchedule(sD,'anacortes');
   YARDS = {
     ballard:   { ...YARD_META.ballard,   docks:applyScheduleToDocks(transformBerths(bD,'ballard'),   balSched), schedule:balSched },
-    anacortes: { ...YARD_META.anacortes, docks:applyScheduleToDocks(transformBerths(bD,'anacortes'), anaSched), schedule:anaSched },
+    anacortes: { ...YARD_META.anacortes, docks:applyScheduleToDocks(transformBerths(bD,'anacortes').filter(d=>!['drydock','dry dock'].includes(d.section)&&d.id!=='drydock'), anaSched), schedule:anaSched },
   };
   PIPELINE = transformPipeline(pD);
   try { const lR = await apiFetch('/api/leads');   if (lR.ok) LEADS   = transformLeads(await lR.json());   } catch(e) { console.warn('Leads unavailable:', e); }
@@ -1006,7 +1006,6 @@ function YardTab({onRefresh}) {
     {key:'boathouse', label:'Boathouses',       sub:'BH1: 82.5ft · 12ft draft  ·  BH2: 82.5ft · 17ft draft', cols:2},
   ] : [
     {key:'railway',   label:'Railways',        sub:'Large: 750T · 130×50ft · 12.5ft draft  ·  Small: 300T · 90×30ft · 10ft (Scrap Only)', cols:2},
-    {key:'drydock',   label:'Dry Dock',        sub:'500 LT', cols:1},
     {key:'pier',      label:'Outside Moorage', sub:'580ft total', cols:1},
     {key:'slip',      label:'Harbor Slips',    sub:'Slip 1: 190ft  ·  Slip 2: 110ft  ·  Slip 3: 150ft', cols:3},
   ];
