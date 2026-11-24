@@ -840,12 +840,6 @@ function Gantt({yard}) {
             <span style={{fontSize:'10px',color:'#f59e0b'}}>Hatched = second vessel on a shared berth</span>
           </div>
         )}
-        {[...new Set(Y.schedule.map(s=>s.vessel))].map(v=>(
-          <div key={v} style={{display:'flex',alignItems:'center',gap:'5px'}}>
-            <div style={{width:'10px',height:'10px',borderRadius:'2px',background:vColor(v)}}/>
-            <span style={{fontSize:'10px',color:'#4b5563'}}>{v}</span>
-          </div>
-        ))}
       </div>
     </div>
   );
