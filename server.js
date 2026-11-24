@@ -567,6 +567,7 @@ app.get('/api/clients/:rowId', async (req, res) => {
         arrival:   r['Arrival Date']   || '',
         departure: r['Departure Date'] || '',
         loa:       r['LOA (ft)']       || '',
+        quoted:    r['Quoted Amount']  ?? '',
       }))
       .sort((a, b) => new Date(b.arrival) - new Date(a.arrival));
 
@@ -659,6 +660,78 @@ app.put('/api/clients/:rowId', async (req, res) => {
     });
     if (r.ok) invalidate(SHEETS.clients);
     await sendSmartsheetResult(res, r, { unmatchedFields });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// CLIENT ATTACHMENTS  (quotes and other files on a vessel's client record)
+// Security: always reads/writes SHEETS.clients. The browser supplies only
+// a row ID or attachment ID — never a sheet ID.
+// ─────────────────────────────────────────────────────────────
+const ATTACH_MAX_MB = 25;
+const isId = v => /^\d+$/.test(String(v || ''));
+
+// GET /api/clients/:rowId/attachments — list files on a client row
+app.get('/api/clients/:rowId/attachments', async (req, res) => {
+  if (!SHEETS.clients) return res.status(503).json({ error: 'SHEET_CLIENTS not configured' });
+  if (!isId(req.params.rowId)) return res.status(400).json({ error: 'Invalid row ID' });
+  try {
+    const r = await fetch(`${SS_BASE}/sheets/${SHEETS.clients}/rows/${req.params.rowId}/attachments?includeAll=true`, { headers: HEADERS });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: d.message || `Smartsheet error ${r.status}` });
+    const files = (d.data || [])
+      .map(a => ({ id: a.id, name: a.name, type: a.attachmentType, sizeInKb: a.sizeInKb || null, createdAt: a.createdAt || null }))
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.json(files);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/clients/:rowId/attachments — upload one file (raw body)
+// Headers from the browser: X-File-Name (URI-encoded), X-File-Type (MIME type)
+app.post('/api/clients/:rowId/attachments',
+  express.raw({ type: () => true, limit: `${ATTACH_MAX_MB}mb` }),
+  async (req, res) => {
+    if (!SHEETS.clients) return res.status(503).json({ error: 'SHEET_CLIENTS not configured' });
+    if (!isId(req.params.rowId)) return res.status(400).json({ error: 'Invalid row ID' });
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'No file received' });
+    let name = '';
+    try { name = decodeURIComponent(req.get('X-File-Name') || ''); } catch (e) { name = ''; }
+    name = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\\/]/g, '_').trim().slice(0, 200);
+    if (!name) return res.status(400).json({ error: 'Missing file name' });
+    const rawType = req.get('X-File-Type') || '';
+    const type = /^[\w.+-]+\/[\w.+-]+$/.test(rawType) ? rawType : 'application/octet-stream';
+    try {
+      const r = await fetch(`${SS_BASE}/sheets/${SHEETS.clients}/rows/${req.params.rowId}/attachments`, {
+        method: 'POST',
+        headers: {
+          Authorization: HEADERS.Authorization,
+          'Content-Type': type,
+          'Content-Disposition': `attachment; filename="${name}"`,
+          'Content-Length': String(req.body.length),
+        },
+        body: req.body,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return res.status(502).json({ error: d.message || `Smartsheet error ${r.status}` });
+      res.json({ ok: true, id: d.result && d.result.id, name });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+// GET /api/client-attachments/:attachmentId — short-lived download link
+app.get('/api/client-attachments/:attachmentId', async (req, res) => {
+  if (!SHEETS.clients) return res.status(503).json({ error: 'SHEET_CLIENTS not configured' });
+  if (!isId(req.params.attachmentId)) return res.status(400).json({ error: 'Invalid attachment ID' });
+  try {
+    const r = await fetch(`${SS_BASE}/sheets/${SHEETS.clients}/attachments/${req.params.attachmentId}`, { headers: HEADERS });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.url) return res.status(502).json({ error: d.message || 'Could not get a download link' });
+    res.json({ url: d.url, name: d.name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
