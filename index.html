@@ -99,14 +99,14 @@ const YARD_META = {
     subtitle: '3100 Oakes Ave, Anacortes, WA 98221  ·  Salt Water Port',
     moorage: '1,800ft moorage  ·  Vessels up to 450ft  ·  750T & 300T Railways  ·  50,000 sqft covered  ·  3 Harbor Slips',
     cranes: '75T · 60T · 30T · 15T',
-    ganttRows: ['LgWay','SmWay','Outside','Slip1','Slip2','Slip3'],
-    ganttLabels: {LgWay:'Large Railway',SmWay:'Small Railway (Scrap)',Outside:'Outside Moorage',Slip1:'Harbor Slip 1',Slip2:'Harbor Slip 2',Slip3:'Harbor Slip 3'},
+    ganttRows: ['LgWay','SmWay','Outside','Barge','Slip1','Slip2','Slip3'],
+    ganttLabels: {LgWay:'Large Railway',SmWay:'Small Railway (Scrap)',Outside:'Outside Moorage',Barge:'Barge Office',Slip1:'Harbor Slip 1',Slip2:'Harbor Slip 2',Slip3:'Harbor Slip 3'},
   },
 };
 
 const ANA_BERTH_KEY = {
   'Large Railway':'LgWay','Small Railway':'SmWay','Dry Dock':'DryDock',
-  'Outside Moorage':'Outside','Harbor Slip 1':'Slip1','Harbor Slip 2':'Slip2','Harbor Slip 3':'Slip3',
+  'Outside Moorage':'Outside','Barge Office':'Barge','Harbor Slip 1':'Slip1','Harbor Slip 2':'Slip2','Harbor Slip 3':'Slip3',
 };
 
 function transformBerths(rows, yard) {
@@ -618,7 +618,8 @@ function DockCard({dock, onRefresh}) {
     section==='railway'   ? `Railway · ${cap} · ${len}ft × ${beam}ft · ${draft}ft draft` :
     section==='sternside' ? `Stern-Side · ${len}ft · ${draft}ft max draft` :
     section==='pier'      ? `Pier-Side · ${len}ft${draft ? ' · '+draft+'ft draft' : ''}` :
-    section==='slip'      ? `Harbor Slip · ${len}ft` : `Boathouse · ${len}ft × ${beam}ft · ${draft}ft draft`;
+    section==='slip'      ? `Harbor Slip · ${len}ft` :
+    section==='barge'     ? `Long-term lease · West end of Outside Moorage${len ? ' · '+len+'ft' : ''}` : `Boathouse · ${len}ft × ${beam}ft · ${draft}ft draft`;
   const capStatus = v => ({available:'Available',occupied:'Occupied',reserved:'Reserved',maintenance:'Maintenance',staging:'Staging'}[v]||v);
   const toInputDate = d => {if(!d)return'';const dt=parseDate(d);if(isNaN(dt))return'';const mm=String(dt.getMonth()+1).padStart(2,'0');const dd=String(dt.getDate()).padStart(2,'0');return`${dt.getFullYear()}-${mm}-${dd}`;};
   const openEdit = () => { setForm({status:status||'available',vesselName:vessel?.name||'',arrival:toInputDate(vessel?.arrival),departure:toInputDate(vessel?.departure),wo:vessel?.wo||'',notes:vessel?.notes||'',quoted:vessel?.quoted??''}); setEditing(true); };
@@ -1001,6 +1002,7 @@ function YardTab({onRefresh}) {
   ] : [
     {key:'railway',   label:'Railways',        sub:'Large: 750T · 130×50ft · 12.5ft draft  ·  Small: 300T · 90×30ft · 10ft (Scrap Only)', cols:2},
     {key:'pier',      label:'Outside Moorage', sub:'580ft total', cols:1},
+    {key:'barge',     label:'Barge Office',    sub:'Stationary leased barge · West end of Outside Moorage', cols:1},
     {key:'slip',      label:'Harbor Slips',    sub:'Slip 1: 190ft  ·  Slip 2: 110ft  ·  Slip 3: 150ft', cols:3},
   ];
   return(
