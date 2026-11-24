@@ -150,13 +150,20 @@ function applyScheduleToDocks(docks, schedule) {
   const keysFor = dock => new Set([dock.name, dock.fullName, ANA_BERTH_KEY[dock.name], ANA_BERTH_KEY[dock.fullName]].filter(Boolean).map(norm));
   return docks.map(dock => {
     const keys = keysFor(dock);
-    const current = schedule
+    const currents = schedule
       .filter(s => keys.has(norm(s.berth)))
       .filter(s => { const a = day(s.arrival), d = day(s.departure); return a && d && a <= today && today <= d; })
-      .sort((a, b) => day(b.arrival) - day(a.arrival))[0];
+      .sort((a, b) => day(b.arrival) - day(a.arrival));
+    const current = currents[0];
     if (current) {
       const same = dock.vessel && norm(dock.vessel.name) === norm(current.vessel);
-      return { ...dock, status:'occupied', vessel:{
+      // Berths that hold more than one vessel at once (e.g. Outside Moorage):
+      // the rest are listed under the main vessel on the Yard card.
+      const moreVessels = currents.slice(1).map(c => ({
+        name: c.vessel, loa: c.loa || null, arrival: c.arrival, departure: c.departure,
+        wo: null, notes: null, quoted: c.quoted ?? null, bookingRowId: c._rowId,
+      }));
+      return { ...dock, status:'occupied', moreVessels, vessel:{
         name: current.vessel, loa: current.loa || null,
         arrival: current.arrival, departure: current.departure,
         wo: same ? dock.vessel.wo : null, notes: same ? dock.vessel.notes : null,
@@ -601,6 +608,11 @@ function DockCard({dock, onRefresh}) {
   const [form,setForm]      =useState({});
   useFormGuard(editing);
   const s = SC[status]||SC.available;
+  const allV = vessel ? [vessel, ...(dock.moreVessels||[])] : [];
+  const usedFt = allV.reduce((t,v)=>t+(Number(v.loa)||0),0);
+  const capLine = allV.length>1
+    ? `${allV.length} vessels${usedFt&&Number(len) ? ` · ${usedFt}ft of ${len}ft used · ${Math.max(Number(len)-usedFt,0)}ft open` : ''}`
+    : '';
   const sub =
     section==='drydock'   ? `Dry Dock · ${cap} · ${len}ft × ${beam}ft · ${draft}ft draft` :
     section==='railway'   ? `Railway · ${cap} · ${len}ft × ${beam}ft · ${draft}ft draft` :
@@ -677,6 +689,7 @@ function DockCard({dock, onRefresh}) {
         <div>
           <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'17px',fontWeight:700,color:'#e2e8f0'}}>{fullName||name}</div>
           <div style={{fontSize:'11px',color:'#475569',marginTop:'3px'}}>{sub}</div>
+          {capLine&&<div style={{fontSize:'11px',color:s.color,fontWeight:600,marginTop:'3px'}}>{capLine}</div>}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:'8px',flexShrink:0}}>
           <Badge status={status}/>
@@ -684,7 +697,19 @@ function DockCard({dock, onRefresh}) {
         </div>
       </div>
       {!vessel&&status==='available'&&<div style={{color:'#10b981',fontSize:'12px'}}>✓ Ready for vessel assignment</div>}
-      {vessel&&<>
+      {vessel&&<VesselDetails vessel={vessel}/>}
+      {(dock.moreVessels||[]).map(v=>(
+        <div key={v.bookingRowId||v.name} style={{background:'rgba(255,255,255,0.02)',border:'1px solid rgba(255,255,255,0.08)',borderLeft:`3px solid ${s.color}`,borderRadius:'8px',padding:'14px 16px',display:'flex',flexDirection:'column',gap:'12px'}}>
+          <VesselDetails vessel={v}/>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// One vessel's details on a Yard card (name, dates, progress, quote, attachments)
+function VesselDetails({vessel}) {
+  return(<>
         <div>
           <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'21px',fontWeight:700,color:'#f1f5f9'}}>{vessel.name}</div>
           {vessel.loa&&<div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>LOA: {vessel.loa}ft</div>}
@@ -709,9 +734,7 @@ function DockCard({dock, onRefresh}) {
           <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',fontWeight:700,color:'#10b981'}}>{fmtMoney(vessel.quoted)}</span>
         </div>}
         <ClientAttachments vesselName={vessel.name}/>
-      </>}
-    </div>
-  );
+  </>);
 }
 
 // ─────────────────────────────────────────────────────────────
