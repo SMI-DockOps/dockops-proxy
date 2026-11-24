@@ -85,6 +85,8 @@
 
 // Excel berth headers (row 2) -> DockOps berth names.
 // null = not mapped yet; those stays are listed but not imported.
+// A list (['A','B']) = one Excel column that covers several DockOps berths;
+// each stay is written to every berth in the list.
 var BERTH_MAP = {
   Ballard: {
     'Dry Dock #1': 'DD1', 'Dry Dock #2': 'DD2',
@@ -93,8 +95,9 @@ var BERTH_MAP = {
   },
   Anacortes: {
     '750 T Railway': 'Large Railway', '500 T Railway': 'Small Railway',
-    '1': 'Outside Moorage',
-    '2': null, '3': null, '4': null, '5': null, '6': null, '7': null,
+    '1': 'Outside Moorage', '2': 'Outside Moorage',
+    '3': 'Harbor Slip 3', '4': ['Harbor Slip 1', 'Harbor Slip 2'],
+    '5': null, '6': null, '7': null,
     '8': null, '9': null, '10': null, '11': null, '12': null, '13': null, '14': null
   }
 };
@@ -266,8 +269,14 @@ function parse(yard) {
 }
 
 function stayId(s) { return s.excelBerth + '|' + s.vessel + '|' + s.arrival; }
+function berthLabel(b) { return Array.isArray(b) ? b.join(' + ') : (b || ''); }
 function importable() {
-  return state.parsed.stays.filter(function (s) { return s.berth && !state.exclude[stayId(s)]; });
+  var out = [];
+  state.parsed.stays.forEach(function (s) {
+    if (!s.berth || state.exclude[stayId(s)]) return;
+    [].concat(s.berth).forEach(function (b) { out.push(Object.assign({}, s, { berth: b })); });
+  });
+  return out;
 }
 
 function renderReview() {
@@ -312,7 +321,7 @@ function table(list, withCheck) {
     '<th>Vessel</th><th>Excel berth</th><th>DockOps berth</th><th>Arrive</th><th>Depart</th><th>Days</th><th>Actual</th><th>Proj.</th><th>Waived</th><th>Shore pwr</th></tr>' +
     list.map(function (s) {
       return '<tr>' + (withCheck ? '<td><input type="checkbox" data-stay="' + esc(stayId(s)) + '"' + (state.exclude[stayId(s)] ? '' : ' checked') + '></td>' : '') +
-        '<td>' + esc(s.vessel) + '</td><td>' + esc(s.excelBerth) + '</td><td>' + esc(s.berth || '—') + '</td><td>' + fmt(s.arrival) + '</td><td>' + fmt(s.departure) +
+        '<td>' + esc(s.vessel) + '</td><td>' + esc(s.excelBerth) + '</td><td>' + esc(berthLabel(s.berth) || '—') + '</td><td>' + fmt(s.arrival) + '</td><td>' + fmt(s.departure) +
         '</td><td>' + s.days + '</td><td>' + s.actualDays + '</td><td>' + s.projectedDays + '</td><td>' + s.waivedDays + '</td><td>' + s.shorePowerDays + '</td></tr>';
     }).join('') + '</table></div>';
 }
