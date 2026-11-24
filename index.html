@@ -137,7 +137,7 @@ function transformSchedule(rows, yard) {
   return rows.filter(r => r['Yard'] === yName).map(r => {
     const raw = r['Berth']||'';
     const berth = yard === 'anacortes' ? (ANA_BERTH_KEY[raw]||raw) : raw;
-    return { vessel:r['Vessel Name'], berth, loa:r['LOA (ft)'], arrival:r['Arrival Date'], departure:r['Departure Date'], _rowId:r._rowId };
+    return { vessel:r['Vessel Name'], berth, loa:r['LOA (ft)'], arrival:r['Arrival Date'], departure:r['Departure Date'], quoted:r['Quoted Amount'], _rowId:r._rowId };
   });
 }
 
@@ -160,6 +160,7 @@ function applyScheduleToDocks(docks, schedule) {
         name: current.vessel, loa: current.loa || null,
         arrival: current.arrival, departure: current.departure,
         wo: same ? dock.vessel.wo : null, notes: same ? dock.vessel.notes : null,
+        quoted: current.quoted ?? null, bookingRowId: current._rowId,
       }};
     }
     if (dock.status === 'occupied') return { ...dock, status:'available', vessel:null };
@@ -515,6 +516,83 @@ function DraftLegend() {
 // ─────────────────────────────────────────────────────────────
 // DOCK CARD
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// CLIENT ATTACHMENTS — files (e.g. quotes) stored on the vessel's
+// Clients & Vessels row in Smartsheet. Used on Yard cards and client profiles.
+// ─────────────────────────────────────────────────────────────
+const fmtMoney = n => (n===null||n===undefined||n==='') ? '' : (isNaN(Number(n)) ? String(n) : '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:2}));
+function ClientAttachments({vesselName, clientRowId}) {
+  const norm = v => String(v||'').trim().toLowerCase();
+  const rowId = clientRowId || (CLIENTS.find(c => norm(c.vesselName) === norm(vesselName)) || {})._rowId;
+  const [files,setFiles] = useState(null);
+  const [busy,setBusy]   = useState(false);
+  const [err,setErr]     = useState('');
+  const inputRef = useRef(null);
+  const load = async () => {
+    if (!rowId) return;
+    try {
+      const r = await apiFetch(`/api/clients/${rowId}/attachments`);
+      const d = await r.json().catch(()=>({}));
+      if (r.ok) setFiles(d); else setErr(d.error || 'Could not load attachments');
+    } catch(e) { setErr('Could not load attachments'); }
+  };
+  useEffect(() => { setFiles(null); setErr(''); load(); }, [rowId]);
+  const upload = async e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 25*1024*1024) { setErr('That file is over 25 MB.'); return; }
+    setBusy(true); setErr('');
+    try {
+      const r = await apiFetch(`/api/clients/${rowId}/attachments`, {
+        method: 'POST', body: file,
+        headers: {'Content-Type':'application/octet-stream','X-File-Name':encodeURIComponent(file.name),'X-File-Type':file.type||'application/octet-stream'},
+      });
+      const d = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(d.error || `Upload failed (${r.status})`);
+      await load();
+    } catch(e) { setErr(e.message || 'Upload failed'); }
+    finally { setBusy(false); }
+  };
+  const open = async f => {
+    const w = window.open('', '_blank');
+    try {
+      const r = await apiFetch(`/api/client-attachments/${f.id}`);
+      const d = await r.json().catch(()=>({}));
+      if (!r.ok || !d.url) throw new Error(d.error || 'Could not open file');
+      if (w) w.location.href = d.url; else window.location.href = d.url;
+    } catch(e) { if (w) w.close(); setErr(e.message); }
+  };
+  const box = {borderTop:'1px solid rgba(255,255,255,0.05)',paddingTop:'10px'};
+  const head = <div style={{fontSize:'10px',fontWeight:700,color:'#475569',letterSpacing:'0.08em'}}>ATTACHMENTS</div>;
+  if (!rowId) return (
+    <div style={box}>{head}
+      <div style={{fontSize:'12px',color:'#475569',marginTop:'6px'}}>No client record for {vesselName || 'this vessel'} yet. Add it in Clients & Vessels to attach quotes.</div>
+    </div>
+  );
+  return (
+    <div style={box}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        {head}
+        <button onClick={()=>inputRef.current&&inputRef.current.click()} disabled={busy}
+          style={{background:'rgba(6,182,212,0.1)',color:'#06b6d4',border:'1px solid rgba(6,182,212,0.3)',padding:'4px 12px',borderRadius:'6px',fontSize:'11px',fontWeight:600,cursor:busy?'default':'pointer'}}>
+          {busy ? 'Uploading…' : '+ Attach file'}
+        </button>
+        <input ref={inputRef} type='file' style={{display:'none'}} onChange={upload}/>
+      </div>
+      {files===null && !err && <div style={{fontSize:'12px',color:'#475569',marginTop:'6px'}}>Loading…</div>}
+      {files && files.length===0 && <div style={{fontSize:'12px',color:'#475569',marginTop:'6px'}}>No files yet.</div>}
+      {files && files.map(f => (
+        <div key={f.id} style={{display:'flex',justifyContent:'space-between',gap:'10px',marginTop:'6px',fontSize:'12px'}}>
+          <button onClick={()=>open(f)} style={{background:'none',border:'none',padding:0,color:'#60a5fa',cursor:'pointer',textAlign:'left',fontSize:'12px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>📎 {f.name}</button>
+          <span style={{color:'#475569',flexShrink:0}}>{f.createdAt ? fmtS(f.createdAt) : ''}</span>
+        </div>
+      ))}
+      {err && <div style={{fontSize:'12px',color:'#f87171',marginTop:'6px'}}>{err}</div>}
+    </div>
+  );
+}
+
 function DockCard({dock, onRefresh}) {
   const{name,fullName,section,cap,len,beam,draft,status,vessel,_rowId}=dock;
   const [editing,setEditing]=useState(false);
@@ -531,13 +609,18 @@ function DockCard({dock, onRefresh}) {
     section==='slip'      ? `Harbor Slip · ${len}ft` : `Boathouse · ${len}ft × ${beam}ft · ${draft}ft draft`;
   const capStatus = v => ({available:'Available',occupied:'Occupied',reserved:'Reserved',maintenance:'Maintenance',staging:'Staging'}[v]||v);
   const toInputDate = d => {if(!d)return'';const dt=parseDate(d);if(isNaN(dt))return'';const mm=String(dt.getMonth()+1).padStart(2,'0');const dd=String(dt.getDate()).padStart(2,'0');return`${dt.getFullYear()}-${mm}-${dd}`;};
-  const openEdit = () => { setForm({status:status||'available',vesselName:vessel?.name||'',arrival:toInputDate(vessel?.arrival),departure:toInputDate(vessel?.departure),wo:vessel?.wo||'',notes:vessel?.notes||''}); setEditing(true); };
+  const openEdit = () => { setForm({status:status||'available',vesselName:vessel?.name||'',arrival:toInputDate(vessel?.arrival),departure:toInputDate(vessel?.departure),wo:vessel?.wo||'',notes:vessel?.notes||'',quoted:vessel?.quoted??''}); setEditing(true); };
   const handleSave = async () => {
     setSaving(true); setSaveErr('');
     const payload={'Status':capStatus(form.status)};
     if(form.status!=='available'){payload['Vessel Name']=form.vesselName;payload['Arrival Date']=form.arrival;payload['Departure Date']=form.departure;payload['Work Order']=form.wo;payload['Notes']=form.notes;}
     try {
       const r=await apiFetch(`/api/berths/${_rowId}`,{method:'PUT',body:JSON.stringify(payload)});
+      if(r.ok&&vessel?.bookingRowId&&String(form.quoted??'')!==String(vessel.quoted??'')){
+        const q=String(form.quoted??'').replace(/[$,\s]/g,'');
+        const qr=await apiFetch(`/api/schedule/${vessel.bookingRowId}`,{method:'PUT',body:JSON.stringify({'Quoted Amount':q===''?'':Number(q)})});
+        if(!qr.ok){const d=await qr.json().catch(()=>({}));setSaveErr(d.error||d.message||`Quoted Amount save failed (${qr.status})`);return;}
+      }
       if(r.ok){setEditing(false);onRefresh();}
       else{const d=await r.json().catch(()=>({}));setSaveErr(d.error||`Save failed (${r.status})`);}
     } catch(e){setSaveErr(e.message||'Save failed — check your connection');}
@@ -574,6 +657,9 @@ function DockCard({dock, onRefresh}) {
             <div><label style={LABEL_S}>Departure Date</label><input type='date' style={INPUT_S} value={form.departure} onChange={e=>setForm(f=>({...f,departure:e.target.value}))}/></div>
           </div>
           <div><label style={LABEL_S}>Notes</label><textarea style={{...INPUT_S,resize:'vertical',minHeight:'64px'}} value={form.notes} placeholder='Work scope, notes…' onChange={e=>setForm(f=>({...f,notes:e.target.value}))}/></div>
+          {vessel?.bookingRowId
+            ? <div><label style={LABEL_S}>Quoted Amount ($)</label><input style={INPUT_S} inputMode='decimal' value={form.quoted} placeholder='e.g. 185000' onChange={e=>setForm(f=>({...f,quoted:e.target.value}))}/></div>
+            : <div style={{fontSize:'11px',color:'#475569'}}>Quoted Amount is saved on the schedule booking. Add this stay to the schedule to enter one.</div>}
         </>
       }
       {saveErr&&<div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',color:'#f87171'}}>{saveErr}</div>}
@@ -618,6 +704,11 @@ function DockCard({dock, onRefresh}) {
         <ProgressBar arrival={vessel.arrival} departure={vessel.departure}/>
         {vessel.wo&&vessel.wo!=='—'&&<div style={{fontSize:'11px',color:'#475569',fontFamily:"'JetBrains Mono',monospace"}}>{vessel.wo}</div>}
         {vessel.notes&&<div style={{fontSize:'12px',color:'#94a3b8',lineHeight:'1.55',borderTop:'1px solid rgba(255,255,255,0.05)',paddingTop:'10px'}}>{vessel.notes}</div>}
+        {fmtMoney(vessel.quoted)&&<div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',borderTop:'1px solid rgba(255,255,255,0.05)',paddingTop:'10px'}}>
+          <span style={{fontSize:'10px',fontWeight:700,color:'#475569',letterSpacing:'0.08em'}}>QUOTED</span>
+          <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:'18px',fontWeight:700,color:'#10b981'}}>{fmtMoney(vessel.quoted)}</span>
+        </div>}
+        <ClientAttachments vesselName={vessel.name}/>
       </>}
     </div>
   );
@@ -1161,6 +1252,10 @@ function ClientProfile({client, onBack, onEdit}) {
         </div>
       )}
 
+      <div style={{background:'#0a1828',border:'1px solid rgba(255,255,255,0.06)',borderRadius:'8px',padding:'4px 16px 14px',marginBottom:'20px'}}>
+        <ClientAttachments clientRowId={c._rowId} vesselName={c.vesselName}/>
+      </div>
+
       <div style={{marginBottom:'12px'}}>
         <div style={{display:'flex',gap:'4px',background:'rgba(255,255,255,0.03)',borderRadius:'8px',padding:'3px',width:'fit-content'}}>
           {[['visits',`Visits (${(h.schedule||[]).length})`],['leads',`Leads (${(h.leads||[]).length})`],['pipeline',`Pipeline (${(h.pipeline||[]).length})`]].map(([id,label])=>(
@@ -1172,15 +1267,16 @@ function ClientProfile({client, onBack, onEdit}) {
       {histTab==='visits'&&((h.schedule||[]).length===0
         ? <EmptyState icon='⚓' title='No visit history yet' sub='Visits will appear here once this vessel is added to the Schedule sheet.'/>
         : <div style={{background:'#0d1728',border:'1px solid rgba(255,255,255,0.07)',borderRadius:'10px',overflow:'hidden'}}>
-          <div style={{display:'grid',gridTemplateColumns:'1.5fr 1fr 1.5fr 1.5fr',padding:'10px 16px',borderBottom:'1px solid rgba(255,255,255,0.08)',fontSize:'10px',color:'#475569',fontWeight:700,letterSpacing:'0.08em'}}>
-            {['YARD','BERTH','ARRIVAL','DEPARTURE'].map(col=><span key={col}>{col}</span>)}
+          <div style={{display:'grid',gridTemplateColumns:'1.5fr 1fr 1.5fr 1.5fr 1fr',padding:'10px 16px',borderBottom:'1px solid rgba(255,255,255,0.08)',fontSize:'10px',color:'#475569',fontWeight:700,letterSpacing:'0.08em'}}>
+            {['YARD','BERTH','ARRIVAL','DEPARTURE','QUOTED'].map(col=><span key={col}>{col}</span>)}
           </div>
           {(h.schedule||[]).map((v,i)=>(
-            <div key={i} className='rh' style={{display:'grid',gridTemplateColumns:'1.5fr 1fr 1.5fr 1.5fr',padding:'10px 16px',borderBottom:i<(h.schedule||[]).length-1?'1px solid rgba(255,255,255,0.04)':'none',alignItems:'center'}}>
+            <div key={i} className='rh' style={{display:'grid',gridTemplateColumns:'1.5fr 1fr 1.5fr 1.5fr 1fr',padding:'10px 16px',borderBottom:i<(h.schedule||[]).length-1?'1px solid rgba(255,255,255,0.04)':'none',alignItems:'center'}}>
               <span style={{fontSize:'12px',color:'#94a3b8'}}>{v.yard}</span>
               <span style={{fontSize:'12px',color:'#64748b'}}>{v.berth}</span>
               <span style={{fontSize:'12px',color:'#64748b'}}>{v.arrival?fmtS(v.arrival):'—'}</span>
               <span style={{fontSize:'12px',color:'#64748b'}}>{v.departure?fmtS(v.departure):'—'}</span>
+              <span style={{fontSize:'12px',color:v.quoted?'#10b981':'#475569',fontWeight:600}}>{fmtMoney(v.quoted)||'—'}</span>
             </div>
           ))}
         </div>
